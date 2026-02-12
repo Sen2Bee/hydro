@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+pysheds
+rasterio
+numpy
+geojson
+python-multipart
+scikit-image
+pyproj
+requests

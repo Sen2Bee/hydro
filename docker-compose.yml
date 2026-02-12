@@ -1,0 +1,94 @@
+﻿version: "3.9"
+
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: hw-postgres
+    environment:
+      POSTGRES_DB: hydrowatch
+      POSTGRES_USER: hydrowatch
+      POSTGRES_PASSWORD: hydrowatch
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hydrowatch -d hydrowatch"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: hw-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: hw-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+  api-service:
+    image: python:3.12-slim
+    container_name: hw-api
+    working_dir: /app
+    environment:
+      DATABASE_URL: postgresql://hydrowatch:hydrowatch@postgres:5432/hydrowatch
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+      S3_BUCKET: hydrowatch-artifacts
+    command: >
+      sh -c "pip install --no-cache-dir fastapi uvicorn[standard] psycopg[binary] pydantic-settings redis boto3 &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload"
+    volumes:
+      - ./services/api-service:/app
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  compute-service:
+    image: python:3.12-slim
+    container_name: hw-compute
+    working_dir: /app
+    environment:
+      DATABASE_URL: postgresql://hydrowatch:hydrowatch@postgres:5432/hydrowatch
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+      S3_BUCKET: hydrowatch-artifacts
+    command: >
+      sh -c "pip install --no-cache-dir redis psycopg[binary] boto3 &&
+             python app.worker.py"
+    volumes:
+      - ./services/compute-service:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  minio_data:
