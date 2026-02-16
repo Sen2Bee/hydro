@@ -1,0 +1,6 @@
+﻿fastapi
+uvicorn[standard]
+psycopg[binary]
+pydantic-settings
+redis
+boto3

@@ -1,7 +1,7 @@
 ﻿services:
   postgres:
     image: postgis/postgis:16-3.4
-    container_name: hw-postgres
+    container_name: hw-postgres-dev
     environment:
       POSTGRES_DB: hydrowatch
       POSTGRES_USER: hydrowatch
@@ -9,7 +9,7 @@
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data_dev:/var/lib/postgresql/data
       - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U hydrowatch -d hydrowatch"]
@@ -19,7 +19,7 @@
 
   redis:
     image: redis:7-alpine
-    container_name: hw-redis
+    container_name: hw-redis-dev
     ports:
       - "6379:6379"
     healthcheck:
@@ -30,7 +30,7 @@
 
   minio:
     image: minio/minio:latest
-    container_name: hw-minio
+    container_name: hw-minio-dev
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -39,11 +39,11 @@
       - "9000:9000"
       - "9001:9001"
     volumes:
-      - minio_data:/data
+      - minio_data_dev:/data
 
   api-service:
     image: python:3.12-slim
-    container_name: hw-api
+    container_name: hw-api-dev
     working_dir: /app
     environment:
       DATABASE_URL: postgresql://hydrowatch:hydrowatch@postgres:5432/hydrowatch
@@ -52,13 +52,16 @@
       S3_ACCESS_KEY_ID: minioadmin
       S3_SECRET_ACCESS_KEY: minioadmin
       S3_BUCKET: hydrowatch-artifacts
+      # Stabilize uvicorn --reload on Windows/WSL2 bind mounts (avoid inotify failures).
+      WATCHFILES_FORCE_POLLING: "true"
     command: >
-      sh -c "pip install --no-cache-dir fastapi uvicorn[standard] psycopg[binary] pydantic-settings redis boto3 &&
+      sh -c "pip install --no-cache-dir -r /app/requirements.txt &&
              uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload"
     volumes:
       - ./services/api-service:/app
     ports:
-      - "8001:8001"
+      # Expose job-API on 8002 to allow running the legacy backend on 8001 in parallel.
+      - "8002:8001"
     depends_on:
       postgres:
         condition: service_healthy
@@ -67,7 +70,7 @@
 
   compute-service:
     image: python:3.12-slim
-    container_name: hw-compute
+    container_name: hw-compute-dev
     working_dir: /app
     environment:
       DATABASE_URL: postgresql://hydrowatch:hydrowatch@postgres:5432/hydrowatch
@@ -77,12 +80,18 @@
       S3_SECRET_ACCESS_KEY: minioadmin
       S3_BUCKET: hydrowatch-artifacts
       LEGACY_BACKEND_PATH: /legacy_backend
+      # Local Sachsen-Anhalt DGM1 COG directory inside container (read-only mount below)
+      ST_COG_DIR: /data/st_dgm1_cog
     command: >
-      sh -c "apt-get update && apt-get install -y --no-install-recommends libexpat1 gdal-bin && rm -rf /var/lib/apt/lists/* && pip install --no-cache-dir redis psycopg[binary] boto3 -r /legacy_backend/requirements.txt &&
+      sh -c "apt-get update && apt-get install -y --no-install-recommends libexpat1 gdal-bin &&
+             rm -rf /var/lib/apt/lists/* &&
+             pip install --no-cache-dir -r /app/requirements.txt -r /legacy_backend/requirements.txt &&
              python app/worker.py"
     volumes:
       - ./services/compute-service:/app
       - ./backend:/legacy_backend:ro
+      # Windows host path: adjust if needed
+      - D:/data/st_dgm1_cog:/data/st_dgm1_cog:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -90,7 +99,5 @@
         condition: service_healthy
 
 volumes:
-  postgres_data:
-  minio_data:
-
-
+  postgres_data_dev:
+  minio_data_dev:
