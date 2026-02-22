@@ -811,6 +811,7 @@ def analyze_dem(
     progress_callback=None,
     analysis_type: str = "starkregen",
     aoi_polygon: list[list[float]] | None = None,
+    weather_context: dict[str, Any] | None = None,
 ) -> dict:
     """Run full flow accumulation analysis and return enriched GeoJSON."""
 
@@ -894,7 +895,31 @@ def analyze_dem(
         f"impervious={layer_info['impervious_source']}"
     )
     analysis_type = (analysis_type or "starkregen").strip().lower()
-    rain_hist_proxy = np.full(acc_norm.shape, 0.60, dtype=float)
+    rain_proxy_value = 0.60
+    weather_source = "constant_baseline"
+    weather_mode_used = "n/a"
+    weather_moisture_class = "n/a"
+    weather_scenarios_mm_h = [30, 50, 100]
+    if isinstance(weather_context, dict):
+        try:
+            rp = float(weather_context.get("rain_proxy"))
+            if np.isfinite(rp):
+                rain_proxy_value = float(np.clip(rp, 0.05, 1.0))
+        except Exception:
+            pass
+        try:
+            s = weather_context.get("scenario_mm_per_h")
+            if isinstance(s, list):
+                vals = sorted({int(round(float(v))) for v in s if np.isfinite(float(v)) and float(v) > 0})
+                if vals:
+                    weather_scenarios_mm_h = vals[:3]
+        except Exception:
+            pass
+        weather_source = str(weather_context.get("source") or weather_source)
+        weather_mode_used = str(weather_context.get("mode_used") or weather_mode_used)
+        weather_moisture_class = str(weather_context.get("moisture_class") or weather_moisture_class)
+
+    rain_hist_proxy = np.full(acc_norm.shape, rain_proxy_value, dtype=float)
 
     # Default: Starkregen-Screening (Score v2).
     # Erosion MVP: topographischer Treiber (LS-Proxy) ohne Anspruch auf Gutachten.
@@ -916,7 +941,11 @@ def analyze_dem(
         )
         risk_score = np.clip(np.round(risk_norm * 100.0), 0.0, 100.0)
         model_version = "risk-v2-soil-impervious"
-        rain_history_assumption = "constant_nrw_baseline"
+        rain_history_assumption = (
+            "weather_driven_proxy"
+            if weather_source != "constant_baseline"
+            else "constant_nrw_baseline"
+        )
 
     valid_mask = np.isfinite(dem_arr) & np.isfinite(acc_arr)
     risk_score[~valid_mask] = np.nan
@@ -1080,11 +1109,7 @@ def analyze_dem(
             metrics["ponding_max_depth_m"] = 0.0
 
     if analysis_type != "erosion":
-        scenarios = [
-            _scenario_summary(risk_norm, valid_mask, 30),
-            _scenario_summary(risk_norm, valid_mask, 50),
-            _scenario_summary(risk_norm, valid_mask, 100),
-        ]
+        scenarios = [_scenario_summary(risk_norm, valid_mask, int(mm)) for mm in weather_scenarios_mm_h]
 
     branches["analysis"] = {
         "kind": analysis_type,
@@ -1096,6 +1121,10 @@ def analyze_dem(
             "soil": layer_info["soil_source"],
             "impervious": layer_info["impervious_source"],
             "rain_history": rain_history_assumption,
+            "rain_proxy": round(float(rain_proxy_value), 3),
+            "weather_source": weather_source,
+            "weather_mode": weather_mode_used,
+            "weather_moisture_class": weather_moisture_class,
             "soil_path": layer_info["soil_path"],
             "impervious_path": layer_info["impervious_path"],
             "layer_aoi_buffer_m": layer_info["layer_aoi_buffer_m"],

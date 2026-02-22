@@ -265,6 +265,18 @@ html {
   background: rgba(0, 0, 0, 0.24);
 }
 
+.icon-link-btn.active {
+  border-color: rgba(0, 229, 255, 0.55);
+  box-shadow: 0 0 0 2px rgba(0, 229, 255, 0.14);
+  color: rgba(255, 255, 255, 0.98);
+}
+
+.icon-link-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
 /* removed standalone "Demnaechst" section; now shown as disabled analysis tile */
 
 .place-search {
@@ -443,6 +455,10 @@ html {
   border-radius: var(--radius-md);
   padding: 10px;
   margin-bottom: 8px;
+}
+
+.section.is-locked {
+  opacity: 0.58;
 }
 
 .section-title {
@@ -1226,6 +1242,37 @@ html {
   width: 100%;
 }
 
+.map-layer-density-segments {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.map-layer-density-seg {
+  appearance: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1;
+  padding: 8px 0;
+  cursor: pointer;
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
+}
+
+.map-layer-density-seg:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.map-layer-density-seg.active {
+  border-color: rgba(0, 229, 255, 0.65);
+  background: rgba(0, 229, 255, 0.12);
+  color: #7cf6ff;
+}
+
 .map-layer-subhint {
   margin-top: 4px;
   font-size: 0.68rem;
@@ -1328,20 +1375,36 @@ html {
 /*  Draw Mode                                                         */
 /* ================================================================== */
 .draw-start-btn {
-  width: 100%;
-  padding: 8px;
-  border: 2px dashed var(--border-accent);
+  flex: 1;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--accent);
-  font-size: 0.82rem;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: 0.8rem;
   font-weight: 600;
   font-family: inherit;
   cursor: pointer;
-  transition: background var(--transition), box-shadow var(--transition);
+  transition: background var(--transition), box-shadow var(--transition), border-color var(--transition), color var(--transition);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
 }
 
 .draw-start-btn:hover {
+  background: var(--bg-hover);
+}
+
+.draw-start-btn.has-area {
+  border: 2px dashed var(--border-accent);
+  color: var(--accent);
+  background: transparent;
+}
+
+.draw-start-btn.has-area:hover {
   background: rgba(0, 229, 255, 0.06);
   box-shadow: 0 0 16px var(--accent-glow);
 }
@@ -1349,6 +1412,12 @@ html {
 .draw-start-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+.draw-start-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .draw-hint {
@@ -1451,6 +1520,8 @@ html {
   font-family: inherit;
   cursor: pointer;
   transition: transform 0.15s, box-shadow 0.15s;
+  position: relative;
+  overflow: hidden;
 }
 
 .bbox-analyze-btn:hover {
@@ -1462,6 +1533,40 @@ html {
   opacity: 0.5;
   cursor: not-allowed;
   transform: none;
+}
+
+.bbox-analyze-btn.is-loading {
+  color: #00151a;
+}
+
+.bbox-analyze-label {
+  position: relative;
+  z-index: 2;
+  display: block;
+  padding: 0 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bbox-analyze-progress {
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  bottom: 4px;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+  z-index: 1;
+}
+
+.bbox-analyze-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.95);
+  transition: width 0.2s ease;
 }
 
 .bbox-redraw-btn {
@@ -1486,6 +1591,205 @@ html {
 .bbox-redraw-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+.weather-date-row {
+  gap: 10px;
+}
+
+.weather-date-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex: 1;
+}
+
+.weather-date-label {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.weather-date-input {
+  appearance: none;
+  width: 100%;
+  height: 34px;
+  border: 1px solid rgba(0, 229, 255, 0.35);
+  border-radius: 9px;
+  background: rgba(7, 12, 24, 0.72);
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  font-family: inherit;
+  padding: 0 10px;
+  outline: none;
+  transition: border-color var(--transition), box-shadow var(--transition), background var(--transition);
+}
+
+.weather-date-input:hover {
+  border-color: rgba(0, 229, 255, 0.55);
+}
+
+.weather-date-input:focus {
+  border-color: rgba(0, 229, 255, 0.85);
+  box-shadow: 0 0 0 2px rgba(0, 229, 255, 0.18);
+  background: rgba(7, 12, 24, 0.86);
+}
+
+.weather-date-input::-webkit-calendar-picker-indicator {
+  filter: invert(88%) sepia(8%) saturate(580%) hue-rotate(160deg) brightness(96%) contrast(90%);
+  cursor: pointer;
+}
+
+.weather-run-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid rgba(0, 0, 0, 0.25);
+  border-top-color: rgba(0, 0, 0, 0.85);
+  animation: spin 0.75s linear infinite;
+}
+
+.weather-progress {
+  margin-top: 8px;
+}
+
+.weather-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+}
+
+.weather-progress-step {
+  color: #7cf6ff;
+  font-weight: 700;
+}
+
+.weather-progress-msg {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.weather-progress-track {
+  margin-top: 4px;
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.weather-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #00c8ff, #22e2ff);
+}
+
+.weather-stats-compact {
+  display: grid;
+  gap: 2px;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.weather-stats-line {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.weather-stats-line .k {
+  color: var(--text-secondary);
+}
+
+.weather-stats-line .v {
+  color: var(--accent);
+  font-weight: 650;
+}
+
+.weather-stats-line .sep {
+  color: rgba(255, 255, 255, 0.32);
+  margin: 0 3px;
+}
+
+.weather-event-bar-ts {
+  display: grid;
+  margin-top: 4px;
+  text-align: center;
+  font-size: 9px;
+  line-height: 10px;
+  opacity: 1;
+  color: rgba(236, 245, 255, 0.96);
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.45);
+  white-space: normal;
+  word-break: break-word;
+  overflow: hidden;
+  background: rgba(2, 8, 20, 0.42);
+  border-radius: 4px;
+  padding: 1px 0;
+}
+
+.weather-event-bar-fill {
+  position: relative;
+  overflow: hidden;
+}
+
+.weather-event-bar-inline {
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  bottom: 2px;
+  display: grid;
+  gap: 1px;
+  text-align: center;
+  font-size: 7.2px;
+  line-height: 8.2px;
+  color: rgba(3, 12, 24, 0.95);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.2);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.weather-event-card {
+  margin-top: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  padding: 7px 9px;
+}
+
+.weather-event-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 0.78rem;
+  line-height: 1.15;
+}
+
+.weather-event-card-head strong {
+  font-size: 0.78rem;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
+.weather-event-card-head span {
+  opacity: 0.88;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.weather-event-card-body {
+  margin-top: 4px;
+  display: grid;
+  gap: 1px;
+  font-size: 0.75rem;
+  line-height: 1.2;
+  opacity: 0.94;
 }
 
 /* ================================================================== */

@@ -1,8 +1,12 @@
 @echo off
 call C:\OSGeo4W\bin\o4w_env.bat
+call "%~dp0resolve_python.bat"
+if errorlevel 1 (
+  echo [ERROR] Kein lauffaehiger Python-Interpreter gefunden.
+  exit /b 1
+)
 cd /d %~dp0backend
 echo.
 echo === Hydrowatch Layer Bootstrap ===
 echo.
-python layer_bootstrap.py
-
+"%PYTHON_EXE%" layer_bootstrap.py

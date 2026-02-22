@@ -5,6 +5,8 @@ REM Run a quick sanity check for the backend Python environment.
 REM This uses the same OSGeo4W environment as run_backend.bat.
 
 call C:\OSGeo4W\bin\o4w_env.bat
+call "%~dp0resolve_python.bat"
+if errorlevel 1 goto :fail_python
 cd /d %~dp0
 
 echo(
@@ -13,20 +15,21 @@ echo(
 
 echo [1/4] PATH python resolution:
 where python 2>nul
+echo selected: %PYTHON_EXE%
 echo(
 
 echo [2/4] Python identity:
-python -c "import sys; print('sys.executable:', sys.executable); print('sys.version:', sys.version.replace('\n',' ')); print('sys.prefix:', sys.prefix); print('sys.base_prefix:', getattr(sys,'base_prefix',None)); print('sys.path[0:6]:', sys.path[0:6])"
+"%PYTHON_EXE%" -c "import sys; print('sys.executable:', sys.executable); print('sys.version:', sys.version.replace('\n',' ')); print('sys.prefix:', sys.prefix); print('sys.base_prefix:', getattr(sys,'base_prefix',None)); print('sys.path[0:6]:', sys.path[0:6])"
 if errorlevel 1 goto :fail_python
 echo(
 
 echo [3/4] Core imports:
-python -c "import encodings, json, math, ctypes; print('ok core imports')"
+"%PYTHON_EXE%" -c "import encodings, json, math, ctypes; print('ok core imports')"
 if errorlevel 1 goto :fail_core
 echo(
 
 echo [4/4] Backend deps imports:
-python -c "import fastapi, uvicorn, rasterio, pyproj, pysheds, numpy, requests; print('ok backend deps')"
+"%PYTHON_EXE%" -c "import fastapi, uvicorn, rasterio, pyproj, pysheds, numpy, requests; print('ok backend deps')"
 if errorlevel 1 goto :fail_deps
 
 echo(

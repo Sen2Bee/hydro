@@ -10,13 +10,14 @@ Stand: 16.02.2026
   - Amtliche Layer: als WMS-Overlays (Referenz).
 - Abflussnetz-Darstellung: "Netz anzeigen" + Slider "Netzdichte" (Filter relativ zum max. Einzugsgebiet in der AOI).
 - Catchment (Einzugsgebiet) als Polygon fuer angeklicktes Segment (optional, D8-basiert, AOI-Clip, Busy-UI).
-- Wetter ist derzeit als Kontext nutzbar (Ist):
-  - `POST /weather-metrics` (DWD-Station, 1 Punkt).
-  - `GET /abflussatlas/weather/stats` (5 Stichprobenpunkte in der AOI-BBox, 10% inset, Verdichtung).
+- Wetter ist als Kontext nutzbar (implementiert):
+  - Primaerquelle: ICON-D2 Grid/Modell (Open-Meteo), inkl. historisch/live/mixed Logik.
+  - `GET /abflussatlas/weather/stats` (automatische Stichprobenzahl je AOI-Groesse: 1/5/9, Quantile + API14).
   - `GET /abflussatlas/weather/preset` (kompakt fuer UI: Vorfeuchte + Regenpresets).
-- Wetter-Zielbild (Soll):
-  - Primaerquelle: flaechendeckendes Grid/Modell (`icon2dSmartFetch` wie BeeApp).
-  - DWD stationbasiert nur als Fallback/Referenz.
+  - `GET /abflussatlas/weather/events` (automatische Starkregen-Ereigniserkennung mit Warnstufen; Quellenmodus `icon2d|dwd|radar|hybrid|hybrid_radar`).
+  - `POST /analyze-bbox` akzeptiert optional `weather_event_mm_h` (aus gewaehlt. Ereignis).
+  - Radar ist als echte Quelle angebunden: built-in DWD RADOLAN (CDC, stündlich) mit lokalem Cache; optional weiterhin externer Connector.
+  - UI-Prinzip bleibt: kein Quellen-Menue; Wetter vor Analyse, Datum + Uebernehmen, Eventauswahl ueber Bar-Chart.
 
 ## 1) Naechste Stabilisierung (kurzfristig, "Produkt statt Prototyp")
 Ziel: weniger Reibung, weniger UI-Fehler, reproduzierbare Ergebnisse.
@@ -37,25 +38,27 @@ Ziel: weniger Reibung, weniger UI-Fehler, reproduzierbare Ergebnisse.
 Ziel: Wetter in die Berechnung einfliessen lassen, ohne UI aufzublasen.
 - Datenstrategie (verbindlich):
   - Primaer: Grid/Modell (`icon2dSmartFetch`) fuer flaechendeckende Werte.
-  - Fallback: DWD-Station, falls Grid nicht verfuegbar.
+  - DWD nur explizit als Legacy-Modus (`WEATHER_PROVIDER=dwd`), kein stiller Fallback.
 - Ein API-Endpunkt fuer UI:
   - `GET /abflussatlas/weather/preset?bbox=...&mode=auto|standard|genauer`
   - Response: `moisture` (trocken/normal/nass) + `rainPreset` (moderat/stark/extrem mm/h) + `meta`
-  - `mode=auto`: kleinere AOI -> 1 Punkt, groessere AOI -> 5 Punkte (10% inset)
+  - `mode=auto`: kleinere AOI -> 1 Punkt, groessere AOI -> 5/9 Punkte (inset)
 - In Starkregen:
-  - Regen-Preset beeinflusst den `Rain`-Term im Risiko-Score (nicht hydraulisch, aber konsistent)
+  - Regen-Preset beeinflusst den `Rain`-Term im Risiko-Score (nicht hydraulisch, aber konsistent).
+  - Optional: ausgewaehltes historisches Ereignis (`max_1h_mm`) steuert `weather_event_mm_h`.
   - Zeitraum wird aus `daysAgo/hours` im Preset-Endpunkt abgeleitet (safe window)
 - In Erosion:
   - Wetter als Trigger/Skalierung (Vorfeuchte + Ereigniskontext), nicht als Haupttreiber
 - Apple-UI:
-  - Im Panel nur "Wetter: Auto" + optional "Genauer"
+  - Wetterblock reduziert: Zeitraum + Uebernehmen + kompakte Ereignisbalken
+  - Eventwahl nur ueber Balken; Detailkarte nur fuer aktives Ereignis
   - Keine Zeitreihen im UI; Zeitreihen bleiben Debug/Export
 
 ### 2.1 Technischer Umbau Wetterquelle (direkt nach MVP-Stabilisierung)
-- Adapter `icon2dFacade`/`icon2dSmartFetch` in dieses Backend integrieren.
-- `GET /abflussatlas/weather` und `/stats` auf Grid-Quelle umstellen.
-- DWD als fallback-freundliche Provider-Option behalten.
-- Ergebnisvergleich (Grid vs DWD) als kurzer QA-Check in 2-3 Referenz-AOIs.
+- Adapter `icon2dFacade`/`icon2dSmartFetch` in dieses Backend integriert.
+- `GET /abflussatlas/weather` und `/stats` laufen auf Grid-Quelle.
+- DWD bleibt als explizite Provider-Option (`WEATHER_PROVIDER=dwd`) fuer Referenz/Legacy.
+- Naechst: Ergebnisvergleich (Grid vs DWD) als QA-Check in 2-3 Referenz-AOIs dokumentieren.
 
 ## 3) Oeffentliche Basisdaten: "50/50 Kommune + Landwirtschaft" (Phase 2)
 Prinzip: keine neuen Menues pro Datensatz; Daten fliessen automatisch in Starkregen/Erosion ein.
@@ -72,6 +75,9 @@ Vorhalten: SA-Ausschnitt sinnvoll (oder live + Cache).
 Ergebnisse:
 - Runoff-Verstaerker: Versiegelung als Faktor im Score.
 - Hotspot-Begruendung: "hoher Versiegelungsgrad" besser belegt.
+Implementierungsziel (naechster Sprint):
+- Public Source Resolver + Download/Cache + AOI-windowed read
+- Layer-Metadaten im Ergebnis (`assumptions`, `sources`, dataset timestamp/version)
 
 ### 3.3 Landbedeckung (ESA WorldCover 10 m)
 Vorhalten: SA-Tiles (on-demand Cache ok).

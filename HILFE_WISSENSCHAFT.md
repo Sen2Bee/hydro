@@ -14,7 +14,7 @@ Outputs:
 4. Hotspots (kritische Punkte mit Begruendung)
 5. Szenarien fuer 30/50/100 mm Niederschlag in 1h
 6. Optional: amtliche Hochwasser-Overlays (WMS) als Referenzdarstellung
-7. Optional: historisches Wetter (DWD, stationsbasiert) zur Einordnung
+7. Optional: historisches Wetter (ICON-D2, gridbasiert) zur Einordnung
 
 Demnaechst: Schlamm/Sediment und Massnahmen-Vergleich.
 
@@ -29,9 +29,9 @@ Ein einzelner Layer ist nie ausreichend. Der kombinierte Score ermoeglicht robus
 
 ## Datenbasis
 ### Primaer
-- DEM (je nach Region automatisch: WCS oder lokaler COG-Katalog)
-- Bodenlayer (z. B. BK50-basiertes Raster)
-- Versiegelungslayer (Raster)
+- DEM Sachsen-Anhalt: DGM1 (LVermGeo Sachsen-Anhalt), lokal als COG-Katalog.
+- Boden Sachsen-Anhalt: BGR BUEK250 (Raster-Ausschnitt), wenn `SOIL_RASTER_PATH` gesetzt ist.
+- Versiegelung Sachsen-Anhalt: Copernicus HRL Imperviousness 10 m, wenn `IMPERVIOUS_RASTER_PATH` gesetzt ist.
 
 ### Fallback
 Wenn Boden/Versiegelung fehlen:
@@ -175,38 +175,64 @@ Wichtig:
 Hydrowatch nutzt Wetter aktuell als **Kontext** fuer Screening (keine hydraulische Tiefensimulation).
 
 Aktueller Stand (Ist):
-- DWD CDC Stundenwerte Niederschlag ("RR"), stationbasiert.
-- Stichprobenpunkte in der AOI werden jeweils einer naechsten Station zugeordnet.
+- Primaerquelle: flaechendeckende ICON-D2 Grid-/Modell-Zeitreihen (Open-Meteo), analog BeeApp-Logik mit `icon2dSmartFetch`.
+- Smart-Host-Logik: historisch/live/mixed je nach Zeitfenster.
 
 Zielbild (Soll):
-- Primaerquelle: flaechendeckende Grid-/Modell-Zeitreihen (BeeApp-Logik mit `icon2dSmartFetch`).
-- DWD bleibt als Fallback/Referenz.
+- Wetter als standardisierter Kontextbaustein fuer Starkregen und Erosion (Vorfeuchte + Quantile + Presets) in allen AOIs.
+- Optionaler Proxy-Betrieb fuer interne ICON2D-Services bleibt moeglich.
 
-Modi:
-- **Standard (schnell):** 1 repraesentativer Punkt (AOI-Zentrum) -> naechstgelegene Station.
-- **Genauer (5 Punkte):** 5 Stichprobenpunkte (Zentrum + 4 "eingesetzte" BBox-Ecken, 10% inset) -> Verdichtung ueber 5 Stationszuordnungen (Mehrheitsklasse + Spannweite).
+Sampling (automatisch, ohne extra UI-Schalter):
+- kleine AOI: 1 repraesentativer Punkt (AOI-Zentrum)
+- mittlere AOI: 5 Stichprobenpunkte (Zentrum + 4 "eingesetzte" BBox-Ecken, 10% inset)
+- grosse AOI: 9 Stichprobenpunkte (3x3 Raster, inset)
 
 API:
-- `POST /weather-metrics`: Standard-Metriken fuer AOI-Zentrum und frei waehlbaren Zeitraum.
+- `POST /weather-metrics`: Legacy/DWD-Metriken (optional, nicht Standardpfad der UI).
 - `GET /abflussatlas/weather/stats`: Statistik je Stichprobenpunkt (Quantile + API14).
+- `GET /abflussatlas/weather/events`: automatische Starkregen-Ereigniserkennung (Peak, Max1h/Max6h, Warnstufe); backendseitig mit Quellenwahl:
+  - `icon2d` (Modell),
+  - `dwd` (Station),
+  - `radar` (DWD RADOLAN, stündlich),
+  - `hybrid` (icon2d+dwd),
+  - `hybrid_radar` (radar+dwd+icon2d, mit Fallback).
 - `GET /abflussatlas/weather/preset`: kompakte Ausgabe fuer die UI (`mode=auto|standard|genauer`, Vorfeuchte + Regenpresets moderat/stark/extrem).
 - Provider-Umschaltung im Backend via ENV:
   - `WEATHER_PROVIDER=auto|icon2d|dwd`
-  - `auto`: icon2d (wenn konfiguriert) mit DWD-Fallback.
+  - `auto`: verhaelt sich wie `icon2d` (kein stiller DWD-Fallback).
+  - `ICON2D_TRANSPORT=direct|proxy|auto` (Open-Meteo direkt, lokaler Proxy, oder auto).
 
 Hinweis zum Zeitraum:
 - Fuer `/abflussatlas/weather/stats` und `/abflussatlas/weather/preset` wird ein "safe window" aus `daysAgo` + `hours` verwendet.
 - Damit werden unvollstaendige "heutige" Daten vermieden.
+- Bei `start/end` wird `end` automatisch auf "heute" begrenzt, falls ein Zukunftsdatum gesetzt wurde.
+- Bei `hybrid_radar` wird standardmaessig der eingebaute DWD-RADOLAN-Reader genutzt (`RADAR_PROVIDER=dwd_radolan`).
+- Optional kann stattdessen ein externer Connector genutzt werden (`RADAR_PROVIDER=connector` + `RADAR_EVENTS_URL=...`).
+- Wenn Radar im Zeitraum nicht verfuegbar ist, faellt das Backend automatisch auf die verfuegbaren Quellen zurueck.
 
-Im Standard-Modus werden fuer den gewaehlten Zeitraum Metriken berechnet:
+UI-Default (wichtig):
+- Kein Quellen-Toggle in der Hauptoberflaeche.
+- Wetter liegt im Ablauf vor der Analyse (`Gebiet -> Wetter -> Analyse`).
+- Datumsauswahl + `Uebernehmen` berechnet Ereignisse und Wetterkontext.
+- Ereignisse werden als kompakter Bar-Chart gezeigt; Auswahl nur ueber Balken.
+- Wetterkennwerte (Vorfeuchte, P90/P95/P99) werden kompakt direkt im Wetterblock angezeigt.
+- Schwellen-/Quellen-Details bleiben in der Doku, nicht als dauerhafte UI-Texte.
+
+Integration in Starkregen-Analyse:
+- Bei `POST /analyze-bbox` wird im Starkregen-Modus standardmaessig ein Wetter-Kontext berechnet (`weather_auto=true`).
+- Daraus werden ein Regen-Proxy (0..1) und dynamische Szenario-Intensitaeten abgeleitet; Erosion bleibt topographisch dominiert.
+- Optional kann ein erkanntes Ereignis direkt uebergeben werden (`weather_event_mm_h`), um die Starkregen-Analyse gezielt auf dieses Ereignis zu setzen.
+
+Fuer den gewaehlten Zeitraum werden Metriken berechnet:
 - Max 1h / 6h / 24h Niederschlag (mm)
 - Summe Niederschlag (mm)
 - Anzahl Stunden ueber Schwellwerten (z. B. >=10/25/40 mm)
 - Top-Stundenereignisse (zur schnellen Plausibilisierung)
 
 Warum diese Reihenfolge:
-- Stationbasiert ist schnell, robust und als MVP-Kontext gut nutzbar.
-- Fuer flaechige Abdeckung und "ueberall Werte" wird auf Grid/Modell (`icon2dSmartFetch`) umgestellt.
+- Grid/Modell (`icon2dSmartFetch`) liefert flaechige Basiswerte.
+- Radar (wenn verfuegbar) verbessert lokale Ereigniserkennung.
+- Stationen dienen als Zusatz/Referenz im Hybridmodus.
 
 ## Unsicherheiten / Grenzen
 1. Modell ist indikatorbasiert, keine vollstaendige 2D-Hydrodynamik
@@ -215,7 +241,7 @@ Warum diese Reihenfolge:
 4. Rechtlich nicht als amtliche Gefahrenkarte zu verwenden
 
 ## Empfohlene Weiterentwicklung
-1. Historische DWD-Regenreihen je AOI integrieren
+1. Oeffentliche Basislayer verbindlich integrieren (Boden, Versiegelung, Landbedeckung) inkl. Cache/Versionierung
 2. Massnahmenmodule (Retention, Entsiegelung) mit Wirkungsabschaetzung
 3. Kalibrierung gegen bekannte Ereignisse (Rueckblick)
 
@@ -227,7 +253,7 @@ Siehe `ROADMAP.md` (MVP -> Ausbau mit OSM, Versiegelung, Landbedeckung, Boden, W
 - API/Streaming: `backend/main.py`
 - Analysekern: `backend/processing.py`
 - WCS/Provider: `backend/wcs_client.py`
-- Wetter (DWD): `backend/weather_dwd.py`
+- Wetter (DWD, Legacy): `backend/weather_dwd.py`
 - Wetter (Batch/Stats, safe window): `backend/abflussatlas_weather.py`, `backend/weather_stats.py`, `backend/weather_window.py`
 - WMS Utils: `backend/wms_utils.py`
 - Frontend-Interaktion: `frontend/src/App.jsx`

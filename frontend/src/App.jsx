@@ -1,9 +1,9 @@
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
+﻿import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { MapContainer, TileLayer, GeoJSON, Rectangle, CircleMarker, Popup, Polyline, Polygon, Pane, useMap, useMapEvents } from 'react-leaflet'
 import L from 'leaflet'
 import './index.css'
 
-const LEGACY_API_URL = import.meta.env.VITE_LEGACY_API_URL || 'http://127.0.0.1:8001'
+const LEGACY_API_URL = import.meta.env.VITE_LEGACY_API_URL || 'http://127.0.0.1:8010'
 const JOB_API_URL = import.meta.env.VITE_JOB_API_URL || 'http://127.0.0.1:8002'
 const DEFAULT_API_MODE = (import.meta.env.VITE_API_MODE || 'legacy').toLowerCase() // legacy | jobs
 const DEMO_PROJECT_ID = import.meta.env.VITE_DEMO_PROJECT_ID || '22222222-2222-2222-2222-222222222222'
@@ -152,9 +152,7 @@ const AOI_HIGH_LIMIT_KM2 = 35
 // "Einzugsgebiet" = contributing upstream area (proxy from flow accumulation).
 // Important: absolute upstream-area thresholds don't work well across very small vs. large AOIs.
 // We therefore use fractions of the maximum upstream area within the current AOI.
-// Slider direction: grob -> fein (left to right).
 const CORRIDOR_DENSITY_PRESETS = [
-    { key: 'main', label: 'Hauptachsen', min_frac_of_max: 0.35 },
     { key: 'coarse', label: 'Grob', min_frac_of_max: 0.15 },
     { key: 'medium', label: 'Mittel', min_frac_of_max: 0.05 },
     { key: 'fine', label: 'Fein', min_frac_of_max: 0.0 }, // no extra filtering
@@ -182,18 +180,17 @@ function upstreamKm2Of(feature) {
 
 function formatAreaCompact(m2, nf) {
     const v = Number(m2)
-    // ASCII-only units (avoid encoding issues like "mÂ²" on some Windows setups).
-    if (!Number.isFinite(v) || v <= 0) return '0 m2'
+    if (!Number.isFinite(v) || v <= 0) return '0 m²'
     // Prefer ha for mid-range values (readable, avoids huge m2 numbers).
     if (v >= 1_000_000) {
         const km2 = v / 1_000_000
-        return `${nf.format(km2)} km2`
+        return `${nf.format(km2)} km²`
     }
     if (v >= 10_000) {
         const ha = v / 10_000
         return `${nf.format(ha)} ha`
     }
-    return `${nf.format(Math.round(v))} m2`
+    return `${nf.format(Math.round(v))} m²`
 }
 
 function officialLayerName(providerKey, type, scenarioKey) {
@@ -343,19 +340,41 @@ function polygonPointsFromGeoJson(geojson) {
     return points.length >= 3 ? points : null
 }
 
-function pointSegDist2(px, py, ax, ay, bx, by) {
+function pointSegNearest(px, py, ax, ay, bx, by) {
     const abx = bx - ax
     const aby = by - ay
     const apx = px - ax
     const apy = py - ay
     const ab2 = abx * abx + aby * aby
-    if (ab2 === 0) return apx * apx + apy * apy
+    if (ab2 === 0) {
+        return { d2: apx * apx + apy * apy, qx: ax, qy: ay, t: 0 }
+    }
     const t = Math.max(0, Math.min(1, (apx * abx + apy * aby) / ab2))
     const qx = ax + t * abx
     const qy = ay + t * aby
     const dx = px - qx
     const dy = py - qy
-    return dx * dx + dy * dy
+    return { d2: dx * dx + dy * dy, qx, qy, t }
+}
+
+function featureNearestToPoint(feature, lat, lon) {
+    const g = feature?.geometry
+    const coords = g?.coordinates
+    if (!coords) return null
+    const lines = g.type === 'MultiLineString' ? coords : [coords]
+    let best = null
+    for (const line of lines) {
+        for (let i = 1; i < line.length; i++) {
+            const a = line[i - 1]
+            const b = line[i]
+            const m = pointSegNearest(lon, lat, a[0], a[1], b[0], b[1])
+            if (!Number.isFinite(m?.d2)) continue
+            if (!best || m.d2 < best.d2) {
+                best = { d2: m.d2, snapLat: Number(m.qy), snapLon: Number(m.qx) }
+            }
+        }
+    }
+    return best
 }
 
 function pointInPolygonLatLon(lat, lon, polyLatLon) {
@@ -381,20 +400,8 @@ function pointInPolygonLatLon(lat, lon, polyLatLon) {
 }
 
 function featureDist2ToPoint(feature, lat, lon) {
-    const g = feature?.geometry
-    const coords = g?.coordinates
-    if (!coords) return Number.POSITIVE_INFINITY
-    const lines = g.type === 'MultiLineString' ? coords : [coords]
-    let best = Number.POSITIVE_INFINITY
-    for (const line of lines) {
-        for (let i = 1; i < line.length; i++) {
-            const a = line[i - 1]
-            const b = line[i]
-            const d2 = pointSegDist2(lon, lat, a[0], a[1], b[0], b[1])
-            if (d2 < best) best = d2
-        }
-    }
-    return best
+    const n = featureNearestToPoint(feature, lat, lon)
+    return Number.isFinite(n?.d2) ? n.d2 : Number.POSITIVE_INFINITY
 }
 
 function nearestFeatureToPoint(features, lat, lon) {
@@ -422,6 +429,29 @@ function approxMetersFromDegDist2(d2, atLatDeg) {
     const kmPerDegLon = 111.32 * Math.cos((lat * Math.PI) / 180)
     const kmPerDeg = (kmPerDegLat + kmPerDegLon) / 2
     return d * kmPerDeg * 1000
+}
+
+function featureScreenLengthPx(feature, map) {
+    if (!feature || !map?.latLngToLayerPoint) return 0
+    const g = feature?.geometry
+    const coords = g?.coordinates
+    if (!coords) return 0
+    const lines = g.type === 'MultiLineString' ? coords : [coords]
+    let total = 0
+    for (const line of lines) {
+        for (let i = 1; i < line.length; i++) {
+            const a = line[i - 1]
+            const b = line[i]
+            const pa = map.latLngToLayerPoint([Number(a[1]), Number(a[0])])
+            const pb = map.latLngToLayerPoint([Number(b[1]), Number(b[0])])
+            if (!pa || !pb) continue
+            const dx = Number(pb.x) - Number(pa.x)
+            const dy = Number(pb.y) - Number(pa.y)
+            const d = Math.hypot(dx, dy)
+            if (Number.isFinite(d)) total += d
+        }
+    }
+    return total
 }
 
 function snapParamsForZoom(zoom) {
@@ -506,13 +536,22 @@ function PointCheckHandler({ geojson, enabled, onPick }) {
             const z = Number(evt?.target?.getZoom?.())
             const zoom = Number.isFinite(z) ? z : 14
             const { snapMaxMeters, alphaUp } = snapParamsForZoom(zoom)
+            const map = evt?.target
+            const minFeaturePx = (zoom >= 16) ? 8 : (zoom >= 14) ? 11 : 14
 
             let best = null
+            let bestSnapLat = null
+            let bestSnapLon = null
             let bestRank = Number.POSITIVE_INFINITY
             let bestD2 = Number.POSITIVE_INFINITY
 
             for (const f of feats) {
-                const d2 = featureDist2ToPoint(f, lat, lon)
+                if (map) {
+                    const pxLen = featureScreenLengthPx(f, map)
+                    if (Number.isFinite(pxLen) && pxLen > 0 && pxLen < minFeaturePx) continue
+                }
+                const nearest = featureNearestToPoint(f, lat, lon)
+                const d2 = Number(nearest?.d2)
                 if (!Number.isFinite(d2)) continue
                 const meters = approxMetersFromDegDist2(d2, lat)
                 if (!Number.isFinite(meters) || meters > snapMaxMeters) continue
@@ -525,6 +564,8 @@ function PointCheckHandler({ geojson, enabled, onPick }) {
                     bestRank = rank
                     best = f
                     bestD2 = d2
+                    bestSnapLat = Number(nearest?.snapLat)
+                    bestSnapLon = Number(nearest?.snapLon)
                 }
             }
 
@@ -536,8 +577,8 @@ function PointCheckHandler({ geojson, enabled, onPick }) {
             const props = best?.properties || {}
             const meters = approxMetersFromDegDist2(bestD2, lat)
             onPick?.({
-                lat,
-                lon,
+                lat: Number.isFinite(bestSnapLat) ? bestSnapLat : lat,
+                lon: Number.isFinite(bestSnapLon) ? bestSnapLon : lon,
                 found: true,
                 distance_m: Number.isFinite(meters) ? Math.round(meters) : null,
                 risk_score: props?.risk_score,
@@ -1257,7 +1298,10 @@ function HelpPage() {
             <div className="help-page-inner">
                 <div className="help-page-head">
                     <h1>Hydrowatch: Hilfe & Wissenschaftliche Methodik</h1>
-                    <a className="help-back-btn" href="#/">Zurueck zur Karte</a>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                        <a className="help-back-btn" href="#/daten">Daten & Quellen</a>
+                        <a className="help-back-btn" href="#/">Zurueck zur Karte</a>
+                    </div>
                 </div>
 
                 <section className="help-page-section">
@@ -1294,9 +1338,9 @@ function HelpPage() {
                 <section className="help-page-section">
                     <h2>Datenquellen und Fallback</h2>
                     <ul>
-                        <li>Topographie: DEM (je nach Region automatisch: WCS oder lokaler COG-Katalog).</li>
-                        <li>Boden: externes Raster (z. B. BK50-abgeleitetes GeoTIFF).</li>
-                        <li>Versiegelung: externes Raster.</li>
+                        <li>Topographie (Sachsen-Anhalt): DGM1 (1 m) von LVermGeo Sachsen-Anhalt, lokal als COG-Katalog.</li>
+                        <li>Boden (Sachsen-Anhalt): BGR BUEK250 als Raster (wenn konfiguriert).</li>
+                        <li>Versiegelung (Sachsen-Anhalt): Copernicus HRL Imperviousness 10 m (wenn konfiguriert).</li>
                         <li>Wenn Layer fehlen: Proxy-Fallback, im Ergebnis transparent markiert (`external`/`proxy`).</li>
                     </ul>
                 </section>
@@ -1354,7 +1398,7 @@ function HelpSection() {
                              <li>Lupe: Ortssuche.</li>
                              <li>Zielkreuz-Button: Zoom auf die gezeichnete AOI.</li>
                              <li>Layer-Button: Ebenen/Basiskarte umschalten.</li>
-                              <li>Netz anzeigen: zeigt ein Abflussnetz; Netzdichte = Schwelle fuer Einzugsgebiet (beitragende Flaeche).</li>
+                              <li>Netz anzeigen: zeigt ein Abflussnetz; Netzdichte waehlen (Grob/Mittel/Fein) fuer die sichtbare Liniendichte.</li>
                               <li>Einzugsgebiet: beim Aktivieren wird kurz gerechnet (Busy-Cursor + "Berechne..." im Layer-Menue).</li>
                               <li>Klick in Karte: Objekt-Check (Risiko am Punkt).</li>
                              <li>Hotspot-Klick: Karte fokussiert + relevante Segmente hervorgehoben.</li>
@@ -1516,8 +1560,7 @@ function zoomMinFracForNet(zoom) {
     if (!Number.isFinite(z)) return 0
     // Coarsen the network automatically when zoomed out.
     // This keeps large AOIs readable without extra UI toggles.
-    if (z <= 12) return 0.35 // Hauptachsen
-    if (z <= 13) return 0.15 // Grob
+    if (z <= 12) return 0.15 // Grob
     if (z <= 14) return 0.05 // Mittel
     return 0.0 // Fein
 }
@@ -1659,19 +1702,30 @@ function MapLayerPanel({ layers, onToggle, basemapKey, onBasemapChange, corridor
                                     <div className="map-layer-subcontrol">
                                         <div className="map-layer-subrow">
                                             <span className="map-layer-subtitle">Netzdichte</span>
-                                            <span className="map-layer-subvalue">{density.label}</span>
                                         </div>
-                                        <input
-                                            className="map-layer-range"
-                                            type="range"
-                                            min="0"
-                                            max={String(CORRIDOR_DENSITY_PRESETS.length - 1)}
-                                            step="1"
-                                            value={String(Number(corridorDensity) || 0)}
-                                            onChange={(e) => onCorridorDensityChange?.(Number(e.target.value))}
+                                        <div
+                                            className="map-layer-density-segments"
+                                            role="radiogroup"
                                             aria-label="Netzdichte"
                                             title={densityTitle}
-                                        />
+                                        >
+                                            {CORRIDOR_DENSITY_PRESETS.map((p, idx) => {
+                                                const active = idx === (Number(corridorDensity) || 0)
+                                                return (
+                                                    <button
+                                                        key={p.key}
+                                                        type="button"
+                                                        role="radio"
+                                                        aria-checked={active}
+                                                        className={`map-layer-density-seg${active ? ' active' : ''}`}
+                                                        onClick={() => onCorridorDensityChange?.(idx)}
+                                                        title={p.label}
+                                                    >
+                                                        {p.label}
+                                                    </button>
+                                                )
+                                            })}
+                                        </div>
                                         <div className="map-layer-net-legend-compact" title="Linienstaerke/Farbe ~ Einzugsgebiet (beitragende Flaeche), relativ in der aktuellen Auswahl">
                                           <span className="map-layer-net-ext map-layer-net-min">{minLabel}</span>
                                           <span className="map-layer-net-mini-wrap" aria-hidden="true">
@@ -1827,7 +1881,7 @@ function PlaceSearchBox({ bbox, onSelect, autoFocus = false, variant = 'sidebar'
     const bboxEast = bbox?.east
 
     useEffect(() => {
-        const runSearch = async (query, signal) => {
+        const runSearch = async (query, controller) => {
             const cacheKey = query.toLowerCase()
             const cached = cacheRef.current.get(cacheKey)
             if (Array.isArray(cached) && cached.length > 0) {
@@ -1840,7 +1894,11 @@ function PlaceSearchBox({ bbox, onSelect, autoFocus = false, variant = 'sidebar'
             setLoading(true)
             setOpen(true) // show "Suche..." immediately (otherwise it feels broken on slow providers)
             setError(null)
+            let timeout = null
             try {
+                timeout = setTimeout(() => {
+                    try { controller.abort() } catch {}
+                }, 6500)
                 const params = new URLSearchParams({ q: query, limit: '6' })
                 if (bboxSouth !== undefined && bboxWest !== undefined && bboxNorth !== undefined && bboxEast !== undefined) {
                     params.set('south', String(bboxSouth))
@@ -1848,7 +1906,7 @@ function PlaceSearchBox({ bbox, onSelect, autoFocus = false, variant = 'sidebar'
                     params.set('north', String(bboxNorth))
                     params.set('east', String(bboxEast))
                 }
-                const res = await fetch(`${LEGACY_API_URL}/geocode?${params.toString()}`, { signal })
+                const res = await fetch(`${LEGACY_API_URL}/geocode?${params.toString()}`, { signal: controller.signal })
                 if (!res.ok) {
                     const txt = await res.text()
                     let detail = txt
@@ -1866,6 +1924,7 @@ function PlaceSearchBox({ bbox, onSelect, autoFocus = false, variant = 'sidebar'
                 setResults([])
                 setOpen(true)
             } finally {
+                if (timeout) clearTimeout(timeout)
                 setLoading(false)
             }
         }
@@ -1890,7 +1949,7 @@ function PlaceSearchBox({ bbox, onSelect, autoFocus = false, variant = 'sidebar'
 
             inflightRef.current = true
             try {
-                await runSearch(query, ac.signal)
+                await runSearch(query, ac)
             } finally {
                 inflightRef.current = false
                 const pending = pendingRef.current
@@ -1898,10 +1957,10 @@ function PlaceSearchBox({ bbox, onSelect, autoFocus = false, variant = 'sidebar'
                 if (pending && pending !== query && pending.trim().length >= 2) {
                     // Fire the latest query after the current one finishes.
                     const ac2 = new AbortController()
-                    await runSearch(pending, ac2.signal)
+                    await runSearch(pending, ac2)
                 }
             }
-        }, 650)
+        }, 260)
         return () => {
             ac.abort()
             clearTimeout(t)
@@ -2012,8 +2071,8 @@ function DataSourcesPage() {
                 <section className="help-page-section">
                     <h2>DGM1 Sachsen-Anhalt</h2>
                     <p>
-                        Digitales Gelaendemodell DGM1 (1 m), Sachsen-Anhalt â€“ Quelle: Landesamt fuer Vermessung und Geoinformation Sachsen-Anhalt (LVermGeo),
-                        bereitgestellt ueber das Geodatenportal Sachsen-Anhalt (Open Data). Datenstand/Abruf: (bitte eintragen).
+                        Digitales Gelaendemodell DGM1 (1 m), Sachsen-Anhalt Ã¢â‚¬â€œ Quelle: Landesamt fuer Vermessung und Geoinformation Sachsen-Anhalt (LVermGeo),
+                        bereitgestellt ueber das Geodatenportal Sachsen-Anhalt (Open Data). Nutzung in der App: lokaler COG-Katalog (`D:\data\st_dgm1_cog`).
                         Verarbeitung: Umwandlung in Cloud Optimized GeoTIFF (COG), Kachelung/Indexierung fuer performante Abfragen.
                     </p>
                 </section>
@@ -2023,8 +2082,9 @@ function DataSourcesPage() {
                     <ul>
                         <li>Starkregen-Hinweiskarte: BKG (WMS), nur Referenzdarstellung.</li>
                         <li>Hochwasser/UEG: zustaendige Landesbehoerden (WMS), amtliche Referenz.</li>
-                        <li>Bodendaten: BGR (BUEK-Uebersichtskarte), grobmasstaebig.</li>
-                        <li>Landcover: ESA WorldCover (10 m) oder CORINE Land Cover (je nach Konfiguration).</li>
+                        <li>Bodendaten: BGR BUEK250 (Sachsen-Anhalt-Ausschnitt).</li>
+                        <li>Landbedeckung: ESA WorldCover 10 m.</li>
+                        <li>Versiegelung: Copernicus HRL Imperviousness 10 m.</li>
                     </ul>
                 </section>
 
@@ -2064,25 +2124,28 @@ function WmsOverlay({ visible, baseUrl, layerName, opacity = 0.6, zIndex = 350 }
     return null
 }
 
-function WeatherPanel({ bbox }) {
-    const [open, setOpen] = useState(false)
-    const [mode, setMode] = useState('standard') // standard | genauer
+function WeatherPanel({ bbox, analysisType = 'starkregen', selectedEvent = null, onSelectEvent = null, disabled = false, onStateChange = null }) {
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState(null)
     const [data, setData] = useState(null)
+    const [progress, setProgress] = useState({ step: 0, total: 0, message: '' })
 
     const defaultRange = useMemo(() => {
         const end = new Date()
-        const start = new Date(end.getFullYear() - 3, end.getMonth(), end.getDate())
+        const start = new Date(end.getTime() - 90 * 24 * 3600 * 1000)
         const toIso = (d) => d.toISOString().slice(0, 10)
         return { start: toIso(start), end: toIso(end) }
     }, [])
-
     const [range, setRange] = useState(defaultRange)
+    const todayIso = useMemo(() => new Date().toISOString().slice(0, 10), [])
 
     const canRun = !!(bbox && Number.isFinite(bbox.south) && Number.isFinite(bbox.west) && Number.isFinite(bbox.north) && Number.isFinite(bbox.east))
+    const bboxKey = useMemo(() => {
+        if (!canRun) return 'none'
+        return `${Number(bbox.south).toFixed(6)}:${Number(bbox.west).toFixed(6)}:${Number(bbox.north).toFixed(6)}:${Number(bbox.east).toFixed(6)}`
+    }, [canRun, bbox])
 
-    const samplePoints5 = useCallback((b) => {
+    const samplePointsAuto = useCallback((b) => {
         const south = Number(b?.south)
         const west = Number(b?.west)
         const north = Number(b?.north)
@@ -2090,9 +2153,17 @@ function WeatherPanel({ bbox }) {
         if (![south, west, north, east].every(Number.isFinite)) return null
         const latC = (south + north) / 2
         const lonC = (west + east) / 2
+
+        const dLat = Math.abs(north - south)
+        const dLon = Math.abs(east - west)
+        const latMidRad = ((south + north) / 2.0) * (Math.PI / 180.0)
+        const kmPerDegLat = 111.32
+        const kmPerDegLon = 111.32 * Math.max(0.01, Math.abs(Math.cos(latMidRad)))
+        const areaKm2 = dLat * kmPerDegLat * dLon * kmPerDegLon
+        if (areaKm2 <= 3.0) return `${latC.toFixed(5)},${lonC.toFixed(5)}`
+
         const latSpan = Math.max(0, north - south)
         const lonSpan = Math.max(0, east - west)
-        // Inset corners to avoid sampling "outside the representative area" on very narrow/odd AOIs.
         const insetFrac = 0.10
         const latInset = Math.min(latSpan * insetFrac, latSpan * 0.45)
         const lonInset = Math.min(lonSpan * insetFrac, lonSpan * 0.45)
@@ -2100,18 +2171,22 @@ function WeatherPanel({ bbox }) {
         const n = north - latInset
         const w = west + lonInset
         const e = east - lonInset
+        if (areaKm2 <= 25.0) {
+            const pts = [[latC, lonC], [s, w], [s, e], [n, w], [n, e]]
+            return pts.map(([lat, lon]) => `${lat.toFixed(5)},${lon.toFixed(5)}`).join(';')
+        }
+        const latMid = (s + n) / 2
+        const lonMid = (w + e) / 2
         const pts = [
-            [latC, lonC],
-            [s, w],
-            [s, e],
-            [n, w],
-            [n, e],
+            [s, w], [s, lonMid], [s, e],
+            [latMid, w], [latMid, lonMid], [latMid, e],
+            [n, w], [n, lonMid], [n, e],
         ]
         return pts.map(([lat, lon]) => `${lat.toFixed(5)},${lon.toFixed(5)}`).join(';')
     }, [])
 
-    const summarizeStats5 = useCallback((resp) => {
-        const per = resp?.stats?.perPoint || resp?.stats?.per_point || []
+    const summarizeStats = useCallback((resp) => {
+        const per = resp?.stats?.perPoint || []
         if (!Array.isArray(per) || per.length === 0) return null
         const order = { trocken: 0, normal: 1, nass: 2 }
         const classes = per
@@ -2130,10 +2205,10 @@ function WeatherPanel({ bbox }) {
         const getQ = (p, qStr) => {
             const qm = p?.precip_hourly?.quantiles_mm
             if (!qm) return null
-            const v = qm[qStr] ?? qm[String(Number(qStr))] ?? null
+            const v = qm[qStr] ?? null
             return typeof v === 'number' && Number.isFinite(v) ? v : null
         }
-        const pickSeries = (qStr) => per.map((p) => getQ(p, qStr)).filter((v) => typeof v === 'number' && Number.isFinite(v))
+        const pickSeries = (qStr) => per.map((p) => getQ(p, qStr)).filter((v) => Number.isFinite(v))
         const median = (arr) => {
             if (!arr.length) return null
             const a = [...arr].sort((x, y) => x - y)
@@ -2142,16 +2217,51 @@ function WeatherPanel({ bbox }) {
         }
         const mm = (arr) => arr.length ? { min: Math.min(...arr), max: Math.max(...arr), med: median(arr) } : null
 
-        const q90 = mm(pickSeries('0.9'))
-        const q95 = mm(pickSeries('0.95'))
-        const q99 = mm(pickSeries('0.99'))
+        return {
+            n: per.length,
+            moisture: { majority, minClass, maxClass },
+            q90: mm(pickSeries('0.9')),
+            q95: mm(pickSeries('0.95')),
+            q99: mm(pickSeries('0.99')),
+        }
+    }, [])
 
-        const dists = per
-            .map((p) => p?.station?.distance_km)
-            .filter((v) => typeof v === 'number' && Number.isFinite(v))
-        const distRange = dists.length ? { min: Math.min(...dists), max: Math.max(...dists) } : null
+    const timelineEvents = useMemo(() => {
+        const all = data?.events?.mergedTop || []
+        const xs = [...(Array.isArray(all) ? all : [])]
+        xs.sort((a, b) => String(a?.peak_ts || '').localeCompare(String(b?.peak_ts || '')))
+        // Keep chart readable in narrow sidebar: show most recent events only.
+        const MAX_BARS = 8
+        return xs.length > MAX_BARS ? xs.slice(xs.length - MAX_BARS) : xs
+    }, [data])
 
-        return { n: per.length, moisture: { majority, minClass, maxClass }, q90, q95, q99, distRange }
+    const timelineMax = useMemo(() => {
+        if (!timelineEvents.length) return 1
+        let m = 1
+        for (const ev of timelineEvents) {
+            const v1 = Number(ev?.max_1h_mm) || 0
+            const v6 = Number(ev?.max_6h_mm) || 0
+            const score = Math.max(v1, v6 / 2)
+            if (score > m) m = score
+        }
+        return m
+    }, [timelineEvents])
+
+    const pickNearestEventToNow = useCallback((events) => {
+        if (!Array.isArray(events) || events.length === 0) return null
+        const now = Date.now()
+        let best = null
+        let bestDt = Number.POSITIVE_INFINITY
+        for (const ev of events) {
+            const t = Date.parse(String(ev?.peak_ts || ''))
+            if (!Number.isFinite(t)) continue
+            const d = Math.abs(t - now)
+            if (d < bestDt) {
+                bestDt = d
+                best = ev
+            }
+        }
+        return best
     }, [])
 
     const run = useCallback(async () => {
@@ -2159,192 +2269,285 @@ function WeatherPanel({ bbox }) {
         setLoading(true)
         setError(null)
         setData(null)
+        setProgress({ step: 1, total: 6, message: 'AOI wird vorbereitet...' })
         try {
-            let res
-            if (mode === 'genauer') {
-                const points = samplePoints5(bbox)
-                if (!points) throw new Error('Ungueltige AOI')
+            const points = samplePointsAuto(bbox)
+            if (!points) throw new Error('Ungueltige AOI')
+            setProgress({ step: 2, total: 6, message: 'Wetterstatistik wird geladen...' })
+
+            const fetchForRange = async (rr) => {
                 const params = new URLSearchParams({
                     points,
-                    hours: String(24 * 14),
-                    daysAgo: '0',
                     quantiles: '0.9,0.95,0.99',
+                    start: rr.start,
+                    end: rr.end,
                 })
-                res = await fetch(`${LEGACY_API_URL}/abflussatlas/weather/stats?${params.toString()}`)
-            } else {
-                res = await fetch(`${LEGACY_API_URL}/weather-metrics`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ ...bbox, start: range.start, end: range.end }),
-                })
-            }
-            if (!res.ok) {
-                const txt = await res.text()
-                let detail = txt
-                try { detail = JSON.parse(txt).detail } catch {}
-                throw new Error(detail)
-            }
-            const json = await res.json()
-            if (mode === 'genauer') {
-                const summary = summarizeStats5(json)
+                const statsRes = await fetch(`${LEGACY_API_URL}/abflussatlas/weather/stats?${params.toString()}`)
+                if (!statsRes.ok) {
+                    const txt = await statsRes.text()
+                    let detail = txt
+                    try { detail = JSON.parse(txt).detail } catch {}
+                    throw new Error(detail)
+                }
+                setProgress((p) => ({ ...p, step: Math.max(3, Number(p.step) || 0), message: 'Ereignisse werden geladen...' }))
+                const eventsRes = await fetch(`${LEGACY_API_URL}/abflussatlas/weather/events?${params.toString()}&source=hybrid_radar`)
+                if (!eventsRes.ok) {
+                    const txt = await eventsRes.text()
+                    let detail = txt
+                    try { detail = JSON.parse(txt).detail } catch {}
+                    throw new Error(detail)
+                }
+                const statsJson = await statsRes.json()
+                const eventsJson = await eventsRes.json()
+                const summary = summarizeStats(statsJson)
                 if (!summary) throw new Error('Keine Wetterdaten im Zeitfenster.')
-                setData({ mode: 'genauer', raw: json, summary })
-            } else {
-                setData({ mode: 'standard', raw: json })
+                return {
+                    summary,
+                    stats: statsJson,
+                    events: eventsJson?.events || { mergedTop: [], perPoint: [] },
+                    endClamped: !!(statsJson?.meta?.endClampedToToday || eventsJson?.meta?.endClampedToToday),
+                }
             }
+
+            const daysInRange = (r) => {
+                const s = new Date(`${r.start}T00:00:00Z`)
+                const e = new Date(`${r.end}T00:00:00Z`)
+                const d = Math.round((e.getTime() - s.getTime()) / (24 * 3600 * 1000)) + 1
+                return Number.isFinite(d) ? Math.max(1, d) : 1
+            }
+            const buildRangeFromEnd = (endIso, days) => {
+                const e = new Date(`${endIso}T00:00:00Z`)
+                const s = new Date(e.getTime() - (Math.max(1, days) - 1) * 24 * 3600 * 1000)
+                const toIso = (d) => d.toISOString().slice(0, 10)
+                return { start: toIso(s), end: toIso(e) }
+            }
+
+            const initialRange = { start: range.start, end: range.end }
+            setProgress({ step: 3, total: 6, message: 'Ursprungszeitraum wird ausgewertet...' })
+            let result = await fetchForRange(initialRange)
+            let usedRange = initialRange
+
+            const initialCount = Number(result?.events?.mergedTop?.length || 0)
+            if (initialCount === 0) {
+                setProgress({ step: 4, total: 6, message: 'Keine Ereignisse gefunden, Zeitraum wird erweitert...' })
+                const nowDays = daysInRange(initialRange)
+                const expansionTargets = [365, 730]
+                for (const spanDays of expansionTargets) {
+                    if (nowDays >= spanDays) continue
+                    const tryRange = buildRangeFromEnd(initialRange.end, spanDays)
+                    const tryResult = await fetchForRange(tryRange)
+                    if (Number(tryResult?.events?.mergedTop?.length || 0) > 0) {
+                        result = tryResult
+                        usedRange = tryRange
+                        break
+                    }
+                }
+            }
+
+            setRange(usedRange)
+            setData(result)
+            const nearest = pickNearestEventToNow(result?.events?.mergedTop || [])
+            onSelectEvent?.(nearest || null)
+            setProgress({ step: 6, total: 6, message: 'Wetterdaten fertig geladen.' })
         } catch (e) {
             setError(e?.message || String(e))
+            setProgress({ step: 0, total: 0, message: '' })
         } finally {
             setLoading(false)
         }
-    }, [bbox, range, canRun, mode, samplePoints5, summarizeStats5])
+    }, [bbox, canRun, onSelectEvent, pickNearestEventToNow, range, samplePointsAuto, summarizeStats])
+
+    const setStart = useCallback((v) => setRange((r) => ({ ...r, start: v })), [])
+    const setEnd = useCallback((v) => {
+        if (!v) return
+        const end = v > todayIso ? todayIso : v
+        setRange((r) => ({ ...r, end }))
+    }, [todayIso])
+
+    const toggleSelectEvent = useCallback((ev) => {
+        const isSel = selectedEvent && selectedEvent.peak_ts === ev?.peak_ts && selectedEvent.point === ev?.point
+        onSelectEvent?.(isSel ? null : ev)
+    }, [onSelectEvent, selectedEvent])
+
+    useEffect(() => {
+        setData(null)
+        setError(null)
+        onSelectEvent?.(null)
+    }, [bboxKey, onSelectEvent])
+
+    useEffect(() => {
+        onStateChange?.({
+            ready: !!(canRun && data?.summary),
+            loading: !!loading,
+            error: error || null,
+        })
+    }, [onStateChange, canRun, data, loading, error])
 
     return (
-        <div className="section">
-            <div className="section-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-                Historisches Wetter (DWD)
-                <button className="mode-btn" onClick={() => setOpen((o) => !o)} style={{ width: 42, padding: '8px 0' }}>
-                    {open ? 'x' : 'o'}
-                </button>
-            </div>
-            {open && (
-                <>
-                    <div className="mode-toggle" style={{ marginTop: 8 }}>
+        <div className={`section${disabled ? ' is-locked' : ''}`}>
+            <div className="section-title">Regenereignisse Zeitraum:</div>
+            <div className="bbox-info" style={{ marginTop: 8 }}>
+                    <div className="bbox-actions weather-date-row" style={{ gap: 10, marginTop: 8, alignItems: 'end' }}>
+                        <label className="weather-date-field" aria-label="Startdatum">
+                            <input className="weather-date-input" type="date" value={range.start} max={todayIso} onChange={(e) => setStart(e.target.value)} disabled={disabled || loading} />
+                        </label>
+                        <label className="weather-date-field" aria-label="Endedatum">
+                            <input className="weather-date-input" type="date" value={range.end} max={todayIso} onChange={(e) => setEnd(e.target.value)} disabled={disabled || loading} />
+                        </label>
                         <button
-                            className={`mode-btn${mode === 'standard' ? ' active' : ''}`}
-                            onClick={() => { setMode('standard'); setData(null); setError(null) }}
+                            className="bbox-analyze-btn"
                             type="button"
-                            disabled={loading}
+                            onClick={run}
+                            disabled={disabled || !canRun || loading}
+                            style={{ flex: '0 0 auto', width: 38, minWidth: 38, padding: '8px 0', marginBottom: 1, display: 'grid', placeItems: 'center' }}
+                            title={loading ? 'Wetter wird geladen...' : 'Wetter/Ereignisse neu berechnen'}
+                            aria-label={loading ? 'Wetter wird geladen' : 'Wetter/Ereignisse neu berechnen'}
                         >
-                            Standard
-                        </button>
-                        <button
-                            className={`mode-btn${mode === 'genauer' ? ' active' : ''}`}
-                            onClick={() => { setMode('genauer'); setData(null); setError(null) }}
-                            type="button"
-                            disabled={loading}
-                        >
-                            Genauer (5 Punkte)
+                            {loading ? (
+                                <span className="weather-run-spinner" aria-hidden="true" />
+                            ) : (
+                                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+                                    <path d="M8 5l10 7l-10 7V5z" fill="currentColor" />
+                                </svg>
+                            )}
                         </button>
                     </div>
-                    <div className="bbox-info" style={{ marginTop: 8 }}>
-                        {mode === 'standard' ? (
-                            <>
-                                <div className="bbox-coords">
-                                    Zeitraum (Stundenwerte Niederschlag, RR)
-                                </div>
-                                <div className="bbox-actions" style={{ gap: 10 }}>
-                                    <label style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1 }}>
-                                        <span style={{ fontSize: 12, opacity: 0.8 }}>Start</span>
-                                        <input
-                                            type="date"
-                                            value={range.start}
-                                            onChange={(e) => setRange((r) => ({ ...r, start: e.target.value }))}
-                                        />
-                                    </label>
-                                    <label style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1 }}>
-                                        <span style={{ fontSize: 12, opacity: 0.8 }}>Ende</span>
-                                        <input
-                                            type="date"
-                                            value={range.end}
-                                            onChange={(e) => setRange((r) => ({ ...r, end: e.target.value }))}
-                                        />
-                                    </label>
-                                </div>
-                            </>
-                        ) : (
-                            <div className="bbox-coords">
-                                Zeitraum: letzte 14 Tage bis heute 00:00 (sicheres Fenster). Ergebnis ist verdichtet: Mehrheit + Spannweite ueber 5 Stichprobenpunkte.
+                    {loading && (
+                        <div className="weather-progress" aria-live="polite">
+                            <div className="weather-progress-row">
+                                <span className="weather-progress-step">{progress.step || 0}/{progress.total || 0}</span>
+                                <span className="weather-progress-msg">{progress.message || 'Wetter wird geladen...'}</span>
                             </div>
-                        )}
-                        <div className="bbox-actions">
-                            <button className="bbox-analyze-btn" onClick={run} disabled={!canRun || loading}>
-                                {loading ? 'Lade...' : 'Wetter laden'}
-                            </button>
+                            <div className="weather-progress-track" aria-hidden="true">
+                                <span
+                                    className="weather-progress-fill"
+                                    style={{ width: `${(Number(progress.total) > 0) ? Math.max(0, Math.min(100, Math.round((Number(progress.step || 0) / Number(progress.total)) * 100))) : 0}%` }}
+                                />
+                            </div>
                         </div>
-                        {!canRun && (
-                            <div className="aoi-warning" style={{ marginTop: 10 }}>
-                                Hinweis: Bitte zuerst ein Gebiet waehlen, damit eine Station automatisch gewaehlt werden kann.
-                            </div>
-                        )}
-                        {error && <p className="status-error">Fehler: {error}</p>}
-                        {data?.mode === 'standard' && data?.raw && (
-                            <div className="stats-box" style={{ marginTop: 10 }}>
-                                <div className="stats-grid">
-                                    <div className="stat">
-                                        <div className="stat-label">Station</div>
-                                        <div className="stat-value">{data.raw.station.name}</div>
-                                        <div className="stat-sub">{data.raw.station.state} | {data.raw.station.distance_km} km</div>
-                                    </div>
-                                    <div className="stat">
-                                        <div className="stat-label">Max 1h</div>
-                                        <div className="stat-value">{data.raw.metrics.max_1h_mm} mm</div>
-                                        <div className="stat-sub">Stunden &ge; 25mm: {data.raw.metrics.count_hours_ge_25mm}</div>
-                                    </div>
-                                    <div className="stat">
-                                        <div className="stat-label">Max 6h</div>
-                                        <div className="stat-value">{data.raw.metrics.max_6h_mm ?? '-'} mm</div>
-                                        <div className="stat-sub">Stunden &ge; 10mm: {data.raw.metrics.count_hours_ge_10mm}</div>
-                                    </div>
-                                    <div className="stat">
-                                        <div className="stat-label">Max 24h</div>
-                                        <div className="stat-value">{data.raw.metrics.max_24h_mm ?? '-'} mm</div>
-                                        <div className="stat-sub">Summe: {data.raw.metrics.total_mm} mm</div>
-                                    </div>
+                    )}
+                    {!canRun && <div className="aoi-warning" style={{ marginTop: 10 }}>Bitte zuerst ein Gebiet waehlen.</div>}
+                    {disabled && <div className="aoi-warning" style={{ marginTop: 10 }}>Bitte zuerst Gebiet fertig festlegen.</div>}
+                    {error && <p className="status-error">Fehler: {error}</p>}
+
+                    {data?.summary && (
+                        <div className="stats-box" style={{ marginTop: 10 }}>
+                            {data?.endClamped && (
+                                <div className="aoi-warning" style={{ marginBottom: 8 }}>
+                                    Ende lag in der Zukunft und wurde auf heute begrenzt.
                                 </div>
-                                {Array.isArray(data.raw.metrics.top_hours) && data.raw.metrics.top_hours.length > 0 && (
-                                    <div style={{ marginTop: 10 }}>
-                                        <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>Top Stunden (mm/1h)</div>
-                                        <div style={{ display: 'grid', gap: 6 }}>
-                                            {data.raw.metrics.top_hours.slice(0, 5).map((e) => (
-                                                <div key={e.ts} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 13 }}>
-                                                    <span style={{ opacity: 0.9 }}>{e.ts.replace('T', ' ').slice(0, 16)}</span>
-                                                    <strong>{e.mm_1h} mm</strong>
-                                                </div>
-                                            ))}
+                            )}
+                            <div className="weather-stats-compact" style={{ marginBottom: 8 }}>
+                                <div className="weather-stats-line">
+                                    <span className="k">Vorfeuchte:</span> <span className="v">{data.summary.moisture.majority || '-'}</span>
+                                    <span className="sep">|</span>
+                                    <span className="k" title="90%-Perzentil der stuendlichen Niederschlaege im gewaehlten Zeitraum (kein Live-Wert).">P90 Stunde:</span> <span className="v">{data.summary.q90 ? `${data.summary.q90.med.toFixed(1)} mm/h` : '-'}</span>
+                                </div>
+                                <div className="weather-stats-line">
+                                    <span className="k" title="95%-Perzentil der stuendlichen Niederschlaege im gewaehlten Zeitraum (kein Live-Wert).">P95 Stunde:</span> <span className="v">{data.summary.q95 ? `${data.summary.q95.med.toFixed(1)} mm/h` : '-'}</span>
+                                    <span className="sep">|</span>
+                                    <span className="k" title="99%-Perzentil der stuendlichen Niederschlaege im gewaehlten Zeitraum (kein Live-Wert).">P99 Stunde:</span> <span className="v">{data.summary.q99 ? `${data.summary.q99.med.toFixed(1)} mm/h` : '-'}</span>
+                                </div>
+                            </div>
+
+                            {timelineEvents.length > 0 && (
+                                <div style={{ marginTop: 10 }}>
+                                    {/*
+                                      Adaptive label density:
+                                      - few events: show timestamp inside bars
+                                      - many events: keep bars clean, details stay below on selection
+                                    */}
+                                    {(() => {
+                                        const showInlineBarText = timelineEvents.length <= 5
+                                        return (
+                                    <div
+                                        style={{
+                                            display: 'grid',
+                                            gridTemplateColumns: `repeat(${Math.max(1, timelineEvents.length)}, minmax(30px, 1fr))`,
+                                            gap: 6,
+                                            alignItems: 'flex-end',
+                                        }}
+                                    >
+                                        {timelineEvents.map((ev, idx) => {
+                                            const v1 = Number(ev?.max_1h_mm) || 0
+                                            const v6 = Number(ev?.max_6h_mm) || 0
+                                            const score = Math.max(v1, v6 / 2)
+                                            const h = Math.max(10, Math.round((score / Math.max(1, timelineMax)) * 44))
+                                            const isSel = selectedEvent && selectedEvent.peak_ts === ev.peak_ts && selectedEvent.point === ev.point
+                                            const cls = String(ev?.warnstufe || '').toLowerCase()
+                                            const color = cls === 'extrem' ? '#ff4d4f' : (cls === 'unwetter' ? '#ff9f1a' : '#1ac8ff')
+                                            const peakRaw = String(ev?.peak_ts || '')
+                                            const d = peakRaw.slice(0, 10)
+                                            const t = peakRaw.slice(11, 16)
+                                            const dShort = d ? d.slice(2) : '--:--'
+                                            return (
+                                                <button
+                                                    key={`tl-${ev.point}-${ev.peak_ts}-${idx}`}
+                                                    type="button"
+                                                    onClick={() => toggleSelectEvent(ev)}
+                                                    disabled={analysisType !== 'starkregen'}
+                                                    title={`${String(ev?.warnstufe || '-').toUpperCase()} | ${String(ev?.peak_ts || '').replace('T', ' ').slice(0, 16)} | Max1h ${v1} mm | Max6h ${v6} mm`}
+                                                    style={{
+                                                        minWidth: 30,
+                                                        width: '100%',
+                                                        height: 84,
+                                                        borderRadius: 6,
+                                                        border: isSel ? '1px solid #00e5ff' : '1px solid rgba(255,255,255,0.14)',
+                                                        background: 'rgba(7,12,24,0.65)',
+                                                        display: 'flex',
+                                                        flexDirection: 'column',
+                                                        justifyContent: 'flex-start',
+                                                        alignItems: 'stretch',
+                                                        padding: 4,
+                                                        cursor: analysisType === 'starkregen' ? 'pointer' : 'not-allowed',
+                                                    }}
+                                                >
+                                                    <span
+                                                        className="weather-event-bar-fill"
+                                                        style={{
+                                                            display: 'block',
+                                                            width: '100%',
+                                                            height: `${h}px`,
+                                                            borderRadius: 4,
+                                                            background: color,
+                                                            opacity: isSel ? 1 : 0.9,
+                                                            marginTop: 'auto'
+                                                        }}
+                                                    >
+                                                        {showInlineBarText && (
+                                                            <span className="weather-event-bar-inline" aria-hidden="true">
+                                                                <span>{dShort}</span>
+                                                                <span>{t || '--:--'}</span>
+                                                            </span>
+                                                        )}
+                                                    </span>
+                                                </button>
+                                            )
+                                        })}
+                                    </div>
+                                        )
+                                    })()}
+                                    {selectedEvent && (
+                                        <div className="weather-event-card">
+                                            <div className="weather-event-card-head">
+                                                <strong>{String(selectedEvent.warnstufe || '-').toUpperCase()}</strong>
+                                                <span>{String(selectedEvent.peak_ts || '').replace('T', ' ').slice(0, 16)}</span>
+                                            </div>
+                                            <div className="weather-event-card-body">
+                                                <span>Max 1h: {selectedEvent.max_1h_mm} mm</span>
+                                                <span>Max 6h: {selectedEvent.max_6h_mm} mm</span>
+                                            </div>
                                         </div>
-                                    </div>
-                                )}
-                                <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
-                                    Quelle: {data.raw.station.source}. (Stationen werden automatisch nach Naehe und Datenabdeckung gewaehlt.)
+                                    )}
                                 </div>
-                            </div>
-                        )}
-                        {data?.mode === 'genauer' && data?.summary && (
-                            <div className="stats-box" style={{ marginTop: 10 }}>
-                                <div className="stats-grid">
-                                    <div className="stat">
-                                        <div className="stat-label">Vorfeuchte</div>
-                                        <div className="stat-value">{data.summary.moisture.majority || '-'}</div>
-                                        <div className="stat-sub">
-                                            Spannweite: {data.summary.moisture.minClass || '-'} - {data.summary.moisture.maxClass || '-'}
-                                        </div>
-                                    </div>
-                                    <div className="stat">
-                                        <div className="stat-label">Moderat (90%)</div>
-                                        <div className="stat-value">{data.summary.q90 ? `${data.summary.q90.med.toFixed(1)} mm/h` : '-'}</div>
-                                        <div className="stat-sub">{data.summary.q90 ? `${data.summary.q90.min.toFixed(1)} - ${data.summary.q90.max.toFixed(1)} mm/h` : ''}</div>
-                                    </div>
-                                    <div className="stat">
-                                        <div className="stat-label">Stark (95%)</div>
-                                        <div className="stat-value">{data.summary.q95 ? `${data.summary.q95.med.toFixed(1)} mm/h` : '-'}</div>
-                                        <div className="stat-sub">{data.summary.q95 ? `${data.summary.q95.min.toFixed(1)} - ${data.summary.q95.max.toFixed(1)} mm/h` : ''}</div>
-                                    </div>
-                                    <div className="stat">
-                                        <div className="stat-label">Extrem (99%)</div>
-                                        <div className="stat-value">{data.summary.q99 ? `${data.summary.q99.med.toFixed(1)} mm/h` : '-'}</div>
-                                        <div className="stat-sub">{data.summary.q99 ? `${data.summary.q99.min.toFixed(1)} - ${data.summary.q99.max.toFixed(1)} mm/h` : ''}</div>
-                                    </div>
-                                </div>
-                                <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
-                                    Quelle: DWD CDC hourly precipitation (RR). (5 Stichprobenpunkte, naechste Station je Punkt
-                                    {data.summary.distRange ? `, Distanz ${data.summary.distRange.min.toFixed(1)} - ${data.summary.distRange.max.toFixed(1)} km` : ''}.)
-                                </div>
-                            </div>
-                        )}
-                    </div>
-                </>
-            )}
+                            )}
+
+                            {timelineEvents.length === 0 && (
+                                <div style={{ marginTop: 8, fontSize: 13, opacity: 0.8 }}>Keine Ereignisse im gewaehlten Zeitraum.</div>
+                            )}
+                        </div>
+                    )}
+                </div>
         </div>
     )
 }
@@ -2383,7 +2586,7 @@ function App() {
     const [drawMode, setDrawMode] = useState(() => (initialUi?.drawMode === 'rectangle' ? 'rectangle' : 'polygon')) // polygon | rectangle
     const [corridorDensity, setCorridorDensity] = useState(() => {
         const v = Number(initialUi?.corridorDensity)
-        if (!Number.isFinite(v)) return 1 // default: Grob (less clutter)
+        if (!Number.isFinite(v)) return 1 // default: Mittel
         return Math.max(0, Math.min(CORRIDOR_DENSITY_PRESETS.length - 1, Math.round(v)))
     })
     const [drawnArea, setDrawnArea] = useState(() => {
@@ -2423,6 +2626,8 @@ function App() {
     const [catchmentLoading, setCatchmentLoading] = useState(false)
     const [catchmentError, setCatchmentError] = useState(null)
     const [catchmentFor, setCatchmentFor] = useState(null) // {lat,lon,aoiHash}
+    const [selectedRainEvent, setSelectedRainEvent] = useState(null)
+    const [weatherUiState, setWeatherUiState] = useState({ ready: false, loading: false, error: null })
     const [wcsHealth, setWcsHealth] = useState({ status: 'unknown', last: null, loading: false, error: null, show: false })
     const [fitKey, setFitKey] = useState(0)
     const [layers, setLayers] = useState(() => {
@@ -2438,6 +2643,10 @@ function App() {
         ]
     })
     const bboxAreaKm2 = useMemo(() => estimateBboxAreaKm2(drawnArea), [drawnArea])
+    const bboxAreaLabel = useMemo(() => {
+        const nf = new Intl.NumberFormat('de-DE', { maximumSignificantDigits: 3 })
+        return formatAreaCompact(km2ToM2(bboxAreaKm2), nf)
+    }, [bboxAreaKm2])
     const initialMapView = useMemo(() => {
         const mv = initialUi?.mapView
         const lat = Number(mv?.lat)
@@ -2447,6 +2656,12 @@ function App() {
         return DEFAULT_MAP_VIEW
     }, [initialUi])
     const [mapViewLive, setMapViewLive] = useState(() => initialMapView)
+    const analysisProgressPct = useMemo(() => {
+        const total = Number(progressInfo?.total || 0)
+        const step = Number(progressInfo?.step || 0)
+        if (!loading || total <= 0) return 0
+        return Math.max(0, Math.min(100, Math.round((step / total) * 100)))
+    }, [loading, progressInfo])
 
     useEffect(() => () => {
         if (uiSaveTimerRef.current) clearTimeout(uiSaveTimerRef.current)
@@ -2694,6 +2909,7 @@ function App() {
         setHighlightFeatureIds([])
         setStatus(null)
         setError(null)
+        if (analysisType !== 'starkregen') setSelectedRainEvent(null)
     }, [analysisType])
 
     const runStreamingRequest = useCallback(async (url, options = {}) => {
@@ -2729,12 +2945,14 @@ function App() {
                     const n = enriched?.features?.length ?? 0
                     const mean = data?.analysis?.metrics?.risk_score_mean
                     const top = enriched?.analysis?.hotspots?.[0] ?? null
+                    const wClass = String(data?.analysis?.assumptions?.weather_moisture_class || '').toLowerCase()
                     setGeoJsonData(enriched)
                     setSelectedHotspot(top)
                     setFitKey((k) => k + 1)
                     const kind = String(data?.analysis?.kind || '').toLowerCase()
                     const label = kind === 'erosion' ? 'mittlerer Erosionsindex' : 'mittleres Risiko'
-                    setStatus(`Analyse fertig: ${n} Segmente, ${label} ${mean ?? '-'} / 100`)
+                    const wx = (kind === 'starkregen' && wClass && wClass !== 'n/a') ? `, Vorfeuchte ${wClass}` : ''
+                    setStatus(`Analyse fertig: ${n} Segmente, ${label} ${mean ?? '-'} / 100${wx}`)
                 },
                 (detail) => { throw new Error(detail) },
             )
@@ -2754,14 +2972,7 @@ function App() {
         await runStreamingRequest(`${LEGACY_API_URL}/analyze?threshold=${threshold}`, { method: 'POST', body })
     }, [threshold, runStreamingRequest, drawnArea, analysisType, aoiProvider, demSource, stPublicParts, stPublicConfirm, stPublicCacheDir, apiMode, jobSel, setDrawActive])
 
-    const handleBboxAnalyze = useCallback(async () => {
-        if (!drawnArea) return
-        // Ensure normal map interaction during/after analysis (drawing disables dragging and can affect touch-zoom).
-        setDrawActive(false)
-        const at = (analysisType === 'erosion') ? 'erosion' : 'starkregen'
-        const isStPublic = aoiProvider === 'sachsen-anhalt' && demSource === 'public'
-
-        if (apiMode !== 'jobs') {
+    const runLegacyBboxAnalyze = useCallback(async (at, isStPublic) => {
             const total = isStPublic ? 12 : 8
             setProgressInfo({ step: 0, total, message: 'DGM wird geladen...' })
             const parts = stPublicParts?.length ? stPublicParts.join(',') : '1'
@@ -2769,8 +2980,11 @@ function App() {
             const cacheDir = isStPublic && stPublicCacheDir.trim()
                 ? `&dem_cache_dir=${encodeURIComponent(stPublicCacheDir.trim())}`
                 : ''
+            const event1h = (at === 'starkregen' && Number.isFinite(Number(selectedRainEvent?.max_1h_mm)))
+                ? `&weather_event_mm_h=${encodeURIComponent(String(Number(selectedRainEvent.max_1h_mm)))}`
+                : ''
             await runStreamingRequest(
-                `${LEGACY_API_URL}/analyze-bbox?threshold=${threshold}&provider=${encodeURIComponent(aoiProvider)}&dem_source=${encodeURIComponent(demSource)}&analysis_type=${encodeURIComponent(at)}${isStPublic ? `&st_parts=${encodeURIComponent(parts)}` : ''}${confirm}${cacheDir}`,
+                `${LEGACY_API_URL}/analyze-bbox?threshold=${threshold}&provider=${encodeURIComponent(aoiProvider)}&dem_source=${encodeURIComponent(demSource)}&analysis_type=${encodeURIComponent(at)}${isStPublic ? `&st_parts=${encodeURIComponent(parts)}` : ''}${confirm}${cacheDir}${event1h}`,
                 {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -2785,6 +2999,17 @@ function App() {
                     }),
                 },
             )
+    }, [stPublicParts, stPublicConfirm, stPublicCacheDir, selectedRainEvent, runStreamingRequest, threshold, aoiProvider, demSource, drawnArea])
+
+    const handleBboxAnalyze = useCallback(async () => {
+        if (!drawnArea) return
+        // Ensure normal map interaction during/after analysis (drawing disables dragging and can affect touch-zoom).
+        setDrawActive(false)
+        const at = (analysisType === 'erosion') ? 'erosion' : 'starkregen'
+        const isStPublic = aoiProvider === 'sachsen-anhalt' && demSource === 'public'
+
+        if (apiMode !== 'jobs') {
+            await runLegacyBboxAnalyze(at, isStPublic)
             return
         }
 
@@ -2819,6 +3044,13 @@ function App() {
                     polygon: (drawnArea.shapeType === 'polygon' && Array.isArray(drawnArea.polygon) && drawnArea.polygon.length >= 3)
                         ? drawnArea.polygon
                         : null,
+                    // Apply explicitly selected rain event in job mode as well (parity with legacy mode).
+                    weather_event_mm_h: (at === 'starkregen' && Number.isFinite(Number(selectedRainEvent?.max_1h_mm)))
+                        ? Number(selectedRainEvent.max_1h_mm)
+                        : undefined,
+                    weather_event_peak_ts: (at === 'starkregen' && selectedRainEvent?.peak_ts)
+                        ? String(selectedRainEvent.peak_ts)
+                        : undefined,
                 },
             }
 
@@ -2877,14 +3109,28 @@ function App() {
             setStatus(`Analyse fertig: ${n} Segmente, ${label} ${mean ?? '-'} / 100`)
             setProgressInfo({ step: 4, total: 4, message: 'Fertig.' })
         } catch (err) {
-            setError(`Fehler: ${err?.message || String(err)}`)
-            setStatus(null)
+            // If job mode fails (network/port/CORS), auto-fallback to legacy for robustness.
+            if (!devUi) {
+                try {
+                    setApiMode('legacy')
+                    setProgressInfo({ step: 0, total: 1, message: 'Job-API nicht erreichbar, Fallback auf Direktanalyse...' })
+                    await runLegacyBboxAnalyze(at, isStPublic)
+                    return
+                } catch (legacyErr) {
+                    setError(`Fehler: ${legacyErr?.message || String(legacyErr)}`)
+                    setStatus(null)
+                }
+            } else {
+                setError(`Fehler: ${err?.message || String(err)}`)
+                setStatus(null)
+            }
         } finally {
         setLoading(false)
         }
     }, [
         drawnArea,
         analysisType,
+        selectedRainEvent,
         apiMode,
         jobSel,
         threshold,
@@ -2894,6 +3140,8 @@ function App() {
         stPublicParts,
         stPublicConfirm,
         stPublicCacheDir,
+        runLegacyBboxAnalyze,
+        devUi,
     ])
 
     const runWcsSelftest = useCallback(async () => {
@@ -3043,6 +3291,8 @@ function App() {
         setCatchmentError(null)
         setCatchmentFor(null)
         setPoi(null)
+        setSelectedRainEvent(null)
+        setWeatherUiState({ ready: false, loading: false, error: null })
     }, [geoJsonData, drawnArea])
 
     useEffect(() => {
@@ -3110,6 +3360,10 @@ function App() {
         return () => ac.abort()
     }, [showCatchment, poi, drawnArea, aoiProvider, demSource, stPublicParts, stPublicConfirm, stPublicCacheDir, analysisType, catchmentFor, catchmentGeojson])
 
+    const areaFixed = !!drawnArea && !drawActive
+    const weatherStepEnabled = areaFixed
+    const analysisStepEnabled = areaFixed && !!weatherUiState?.ready && !weatherUiState?.loading
+
     return (
         <div className="app-container">
             <button className="sidebar-toggle" onClick={() => setSidebarOpen((o) => !o)} aria-label="Toggle Sidebar">
@@ -3122,9 +3376,9 @@ function App() {
                         <h1>RisikoKarte</h1>
                         <button
                             className="icon-link-btn"
-                            onClick={() => { window.location.hash = '#/daten' }}
-                            title="Daten & Quellen"
-                            aria-label="Daten & Quellen"
+                            onClick={() => { window.location.hash = '#/hilfe' }}
+                            title="Hilfe & Quellen"
+                            aria-label="Hilfe & Quellen"
                             type="button"
                         >
                             i
@@ -3133,21 +3387,32 @@ function App() {
                 </div>
 
                 <div className="section">
-                    <div className="section-title">Gebiet</div>
-                    <button
-                        className="draw-start-btn"
-                        onClick={() => {
-                            setInputMode('draw')
-                            if (drawnArea) beginRedraw()
-                            else setDrawActive(true)
-                        }}
-                        disabled={loading}
-                        type="button"
-                    >
-                        {drawnArea ? 'Gebiet aendern' : 'Gebiet auswaehlen'}
-                    </button>
-
-                    <div className="bbox-actions" style={{ gap: 10, marginTop: 10 }}>
+                    <div className="section-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                        <span>Gebiet</span>
+                        {drawnArea && !drawActive && (
+                            <span style={{ fontSize: 12, opacity: 0.85, textTransform: 'none', letterSpacing: 'normal' }}>{bboxAreaLabel}</span>
+                        )}
+                    </div>
+                    <div className="bbox-actions" style={{ gap: 10, marginTop: 8 }}>
+                        <button
+                            className={`draw-start-btn${drawnArea ? ' has-area' : ''}`}
+                            onClick={() => {
+                                setInputMode('draw')
+                                if (drawnArea) beginRedraw()
+                                else setDrawActive(true)
+                            }}
+                            disabled={loading}
+                            type="button"
+                            title={drawnArea ? 'Gebiet auf Karte neu zeichnen' : 'Gebiet auf Karte zeichnen'}
+                        >
+                            <span className="draw-start-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" width="14" height="14" focusable="false">
+                                    <path d="M4 17.5V20h2.5L17.8 8.7l-2.5-2.5L4 17.5z" fill="currentColor" />
+                                    <path d="M14.6 5.4l2.5 2.5 1.1-1.1a1 1 0 0 0 0-1.4l-1.1-1.1a1 1 0 0 0-1.4 0l-1.1 1.1z" fill="currentColor" />
+                                </svg>
+                            </span>
+                            <span>{drawnArea ? 'Zeichnen' : 'Gebiet waehlen'}</span>
+                        </button>
                         <button
                             className="bbox-redraw-btn"
                             onClick={() => {
@@ -3158,7 +3423,7 @@ function App() {
                             disabled={loading}
                             type="button"
                         >
-                            GeoJSON import
+                            Import
                         </button>
                         <input
                             ref={aoiFileRef}
@@ -3210,32 +3475,28 @@ function App() {
                         </>
                     )}
 
-                    {drawnArea && !drawActive && (
-                        <div className="bbox-info" style={{ marginTop: 12 }}>
-                            <div className="bbox-coords">
-                                Modus: {drawnArea.shapeType === 'polygon' ? 'Polygon' : 'Rechteck'}
-                                <br />
-                                {drawnArea.south.toFixed(4)} - {drawnArea.north.toFixed(4)}
-                                <br />
-                                {drawnArea.west.toFixed(4)} - {drawnArea.east.toFixed(4)}
-                                <br />
-                                Flaeche: {bboxAreaKm2.toFixed(2)} km2
-                            </div>
-                            {bboxAreaKm2 > AOI_SOFT_LIMIT_KM2 && (
-                                <div className={`aoi-warning${bboxAreaKm2 > AOI_HIGH_LIMIT_KM2 ? ' high' : ''}`}>
-                                    {bboxAreaKm2 <= AOI_HIGH_LIMIT_KM2 && (
-                                        <span>Hinweis: kann laenger dauern, Large-AOI Modus kann aktiv werden.</span>
-                                    )}
-                                    {bboxAreaKm2 > AOI_HIGH_LIMIT_KM2 && (
-                                        <span>Grosse Auswahl: empfehlenswert ist Aufteilung in kleinere Teilgebiete.</span>
-                                    )}
-                                </div>
+                    {drawnArea && !drawActive && bboxAreaKm2 > AOI_SOFT_LIMIT_KM2 && (
+                        <div className={`aoi-warning${bboxAreaKm2 > AOI_HIGH_LIMIT_KM2 ? ' high' : ''}`} style={{ marginTop: 12 }}>
+                            {bboxAreaKm2 <= AOI_HIGH_LIMIT_KM2 && (
+                                <span>Hinweis: kann laenger dauern, Large-AOI Modus kann aktiv werden.</span>
+                            )}
+                            {bboxAreaKm2 > AOI_HIGH_LIMIT_KM2 && (
+                                <span>Grosse Auswahl: empfehlenswert ist Aufteilung in kleinere Teilgebiete.</span>
                             )}
                         </div>
                     )}
                 </div>
 
-                <div className="section">
+                <WeatherPanel
+                    bbox={drawnArea ? { south: drawnArea.south, west: drawnArea.west, north: drawnArea.north, east: drawnArea.east } : null}
+                    analysisType={analysisType}
+                    selectedEvent={selectedRainEvent}
+                    onSelectEvent={setSelectedRainEvent}
+                    disabled={!weatherStepEnabled}
+                    onStateChange={setWeatherUiState}
+                />
+
+                <div className={`section${analysisStepEnabled ? '' : ' is-locked'}`}>
                     <div className="section-title">Analyse</div>
                     <div className="analysis-segments" role="radiogroup" aria-label="Analyse auswaehlen">
                         {[
@@ -3249,7 +3510,7 @@ function App() {
                                 role="radio"
                                 aria-checked={analysisType === opt.id}
                                 className={`analysis-seg${analysisType === opt.id ? ' active' : ''}${opt.disabled ? ' is-disabled' : ''}`}
-                                disabled={!!opt.disabled}
+                                disabled={!!opt.disabled || !analysisStepEnabled}
                                 onClick={() => { if (!opt.disabled) setAnalysisType(opt.id) }}
                             >
                                 <span className="analysis-seg-icon" aria-hidden="true">
@@ -3289,12 +3550,13 @@ function App() {
                     </div>
                     <div className="bbox-actions" style={{ marginTop: 12 }}>
                         <button
-                            className="bbox-analyze-btn"
+                            className={`bbox-analyze-btn${loading ? ' is-loading' : ''}`}
                             onClick={handleBboxAnalyze}
                             disabled={
                                 loading ||
                                 drawActive ||
                                 !drawnArea ||
+                                !analysisStepEnabled ||
                                 analysisType === 'sediment' ||
                                 (aoiProvider === 'sachsen-anhalt' &&
                                     demSource === 'public' &&
@@ -3302,9 +3564,23 @@ function App() {
                             }
                             type="button"
                         >
-                            Analyse starten
+                            <span className="bbox-analyze-label">
+                                {loading
+                                    ? `${progressInfo?.step || 0}/${progressInfo?.total || 0} ${progressInfo?.message || 'Analyse laeuft...'}`
+                                    : 'Analyse starten'}
+                            </span>
+                            {loading && (
+                                <span className="bbox-analyze-progress" aria-hidden="true">
+                                    <span className="bbox-analyze-progress-fill" style={{ width: `${analysisProgressPct}%` }} />
+                                </span>
+                            )}
                         </button>
                     </div>
+                    {!analysisStepEnabled && (
+                        <div className="aoi-warning" style={{ marginTop: 10 }}>
+                            Bitte zuerst Regenereignisse laden.
+                        </div>
+                    )}
                 </div>
 
                 {devUi && (
@@ -3426,15 +3702,12 @@ function App() {
 
                 {/* AOI controls merged into the "Gebiet" section above. */}
 
-                {(loading || status || error) && (
+                {(status || error) && (
                     <div className="section">
-                        {loading && <ProgressBar step={progressInfo.step} total={progressInfo.total} message={progressInfo.message} />}
-                        {status && !loading && <p className="status-success">{status}</p>}
+                        {status && <p className="status-success">{status}</p>}
                         {error && <p className="status-error">{error}</p>}
                     </div>
                 )}
-
-                <WeatherPanel bbox={drawnArea ? { south: drawnArea.south, west: drawnArea.west, north: drawnArea.north, east: drawnArea.east } : null} />
 
                 <StatsBox data={geoJsonData} />
                 <ScenarioBox data={geoJsonData} />
@@ -3447,41 +3720,6 @@ function App() {
                 <ExportBox data={geoJsonData} />
                 <ActionSummary data={geoJsonData} />
 
-                <details className="details-panel">
-                    <summary>
-                        <span className="details-title">Details</span>
-                        <span className="details-hint">Layer, Wetter, Methodik</span>
-                    </summary>
-                    <div className="details-panel-body">
-                        {devUi && (
-                            <div className="section">
-                                <div className="section-title">Eigene Hoehendaten (GeoTIFF)</div>
-                                <DropZone onFile={handleFile} disabled={loading} />
-                            </div>
-                        )}
-                        <ThresholdSlider value={threshold} onChange={setThreshold} />
-                        <div className="section">
-                            <div className="section-title">Amtliche Hochwasser-Layer</div>
-                            <div className="bbox-info">
-                                <div className="bbox-coords">
-                                    Provider (auto): {OFFICIAL_WMS[aoiProvider]?.label || aoiProvider}
-                                </div>
-                                <div className="bbox-actions" style={{ gap: 10 }}>
-                                    <select value={officialScenario} onChange={(e) => setOfficialScenario(e.target.value)} style={{ width: '100%' }}>
-                                        {Object.entries(OFFICIAL_WMS[aoiProvider]?.scenarios || OFFICIAL_WMS.nrw.scenarios).map(([k, v]) => (
-                                            <option key={k} value={k}>{v.label}</option>
-                                        ))}
-                                    </select>
-                                </div>
-                                <div className="bbox-coords" style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>
-                                    Overlays aktivierst du im Karten-Menue (Layer-Button rechts oben: o).
-                                </div>
-                            </div>
-                        </div>
-                        <HelpSection />
-                        <Legend />
-                    </div>
-                </details>
             </div>
 
             <MapContainer className={catchmentLoading ? 'map-busy' : ''} center={[initialMapView.lat, initialMapView.lon]} zoom={initialMapView.zoom} zoomControl={false} style={{ height: '100vh', width: '100%' }}>
@@ -3739,5 +3977,6 @@ function App() {
 }
 
 export default App
+
 
 

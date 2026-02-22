@@ -14,11 +14,13 @@ NOMINATIM_USER_AGENT = os.getenv(
     "hydrowatch (local dev; set NOMINATIM_USER_AGENT for production)",
 )
 
-# Nominatim usage policy: keep request rate low. We enforce a simple 1 req/s gate.
+# Keep request rate bounded; interval is configurable via GEOCODE_MIN_INTERVAL_S.
 _LOCK = threading.Lock()
 _LAST_CALL = 0.0
 _CACHE: dict[tuple, tuple[float, list[dict[str, Any]]]] = {}
 _CACHE_TTL_S = float(os.getenv("GEOCODE_CACHE_TTL_S", str(24 * 3600)))
+_MIN_INTERVAL_S = float(os.getenv("GEOCODE_MIN_INTERVAL_S", "0.25"))
+_REQUEST_TIMEOUT_S = float(os.getenv("GEOCODE_TIMEOUT_S", "6"))
 
 
 def _cache_get(key: tuple) -> list[dict[str, Any]] | None:
@@ -58,8 +60,8 @@ def geocode(
     wait_s = 0.0
     with _LOCK:
         now = time.time()
-        wait_s = max(0.0, 1.0 - (now - _LAST_CALL))
-        # Reserve the next slot to keep global rate <= 1 req/s across threads.
+        wait_s = max(0.0, _MIN_INTERVAL_S - (now - _LAST_CALL))
+        # Reserve next slot to keep request cadence bounded across threads.
         _LAST_CALL = now + wait_s
     if wait_s > 0:
         time.sleep(wait_s)
@@ -85,7 +87,7 @@ def geocode(
         "Accept-Language": "de,en;q=0.7",
     }
 
-    r = requests.get(NOMINATIM_URL, params=params, headers=headers, timeout=15)
+    r = requests.get(NOMINATIM_URL, params=params, headers=headers, timeout=_REQUEST_TIMEOUT_S)
     r.raise_for_status()
     data = r.json()
     out = []

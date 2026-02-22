@@ -14,6 +14,10 @@ TEN_MIN_S = 10 * 60
 _CACHE: dict[str, tuple[float, object]] = {}
 _CACHE_LOCK = threading.Lock()
 ICON2D_TIMEOUT_S = int(os.getenv("ICON2D_TIMEOUT_S", "45") or 45)
+HIST_HOST = "https://historical-forecast-api.open-meteo.com/v1/forecast"
+LIVE_HOST = "https://api.open-meteo.com/v1/forecast"
+MODEL = "icon_d2"
+MIXED_CUTOFF_DAYS = int(os.getenv("ICON2D_CUTOFF_DAYS", "16") or 16)
 
 
 def _now_s() -> float:
@@ -69,9 +73,9 @@ def _cache_set(key: str, obj: object) -> None:
 
 
 def _provider_mode() -> str:
-    mode = (os.getenv("WEATHER_PROVIDER", "auto") or "auto").strip().lower()
+    mode = (os.getenv("WEATHER_PROVIDER", "icon2d") or "icon2d").strip().lower()
     if mode not in ("auto", "icon2d", "dwd"):
-        return "auto"
+        return "icon2d"
     return mode
 
 
@@ -80,6 +84,13 @@ def _icon2d_base_url() -> str | None:
     if not base:
         return None
     return base.rstrip("/")
+
+
+def _icon2d_transport() -> str:
+    mode = (os.getenv("ICON2D_TRANSPORT", "auto") or "auto").strip().lower()
+    if mode not in ("auto", "direct", "proxy"):
+        return "auto"
+    return mode
 
 
 def _normalize_point_key(lat: float, lon: float) -> str:
@@ -204,7 +215,7 @@ def _normalize_icon2d_response(raw: object, points: list[tuple[float, float]]) -
     raise RuntimeError("icon2d response konnte nicht normalisiert werden (keine gueltigen Reihen).")
 
 
-def _fetch_batch_icon2d(points: list[tuple[float, float]], start_iso: str, end_iso: str, agg: str = "hourly") -> list[dict]:
+def _fetch_batch_icon2d_proxy(points: list[tuple[float, float]], start_iso: str, end_iso: str, agg: str = "hourly") -> list[dict]:
     base = _icon2d_base_url()
     if not base:
         raise RuntimeError("ICON2D_BASE_URL ist nicht gesetzt.")
@@ -222,6 +233,175 @@ def _fetch_batch_icon2d(points: list[tuple[float, float]], start_iso: str, end_i
     resp = requests.post(url, json=payload, timeout=ICON2D_TIMEOUT_S)
     resp.raise_for_status()
     return _normalize_icon2d_response(resp.json(), points)
+
+
+def _iso_from_open_meteo_time(t: object) -> str | None:
+    if t is None:
+        return None
+    s = str(t).strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        return s
+    if len(s) == 16 and "T" in s:
+        s = s + ":00"
+    try:
+        d = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=dt.timezone.utc)
+        return d.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    except Exception:
+        return None
+
+
+def _to_yyyy_mm_dd(iso: str) -> str:
+    d = dt.datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(dt.timezone.utc)
+    return d.date().isoformat()
+
+
+def _icon2d_fetch_batch_all_open_meteo(
+    points: list[tuple[float, float]],
+    start_iso: str,
+    end_iso: str,
+    *,
+    live: bool,
+) -> list[dict]:
+    if not points:
+        return []
+
+    host = LIVE_HOST if live else HIST_HOST
+    lats = ",".join(f"{float(lat):.6f}" for lat, _ in points)
+    lons = ",".join(f"{float(lon):.6f}" for _, lon in points)
+    params = {
+        "latitude": lats,
+        "longitude": lons,
+        "hourly": "precipitation",
+        "start_date": _to_yyyy_mm_dd(start_iso),
+        "end_date": _to_yyyy_mm_dd(end_iso),
+        "models": MODEL,
+        "timezone": "UTC",
+    }
+
+    resp = requests.get(host, params=params, timeout=ICON2D_TIMEOUT_S)
+    resp.raise_for_status()
+    raw = resp.json()
+    locations = raw if isinstance(raw, list) else [raw]
+
+    out: list[dict] = []
+    for idx, (lat, lon) in enumerate(points):
+        loc = locations[idx] if idx < len(locations) else {}
+        hourly = loc.get("hourly") if isinstance(loc, dict) else {}
+        times = hourly.get("time") if isinstance(hourly, dict) else None
+        vals = hourly.get("precipitation") if isinstance(hourly, dict) else None
+        if not isinstance(times, list) or not isinstance(vals, list):
+            out.append(
+                {
+                    "point": _normalize_point_key(lat, lon),
+                    "station": {"source": "Open-Meteo ICON-D2", "model": MODEL, "host": host},
+                    "series": [],
+                }
+            )
+            continue
+
+        series: list[dict] = []
+        for i, t in enumerate(times):
+            tt = _iso_from_open_meteo_time(t)
+            if not tt:
+                continue
+            if i >= len(vals):
+                continue
+            try:
+                p = float(vals[i])
+            except Exception:
+                continue
+            if not math.isfinite(p):
+                continue
+            series.append({"t": tt, "precip_mm": p})
+
+        out.append(
+            {
+                "point": _normalize_point_key(lat, lon),
+                "station": {"source": "Open-Meteo ICON-D2", "model": MODEL, "host": host},
+                "series": series,
+            }
+        )
+    return out
+
+
+def _merge_point_series(a: list[dict], b: list[dict]) -> list[dict]:
+    by_t: dict[str, float] = {}
+    for src in (a, b):
+        for row in src:
+            t = row.get("t")
+            if not isinstance(t, str):
+                continue
+            try:
+                p = float(row.get("precip_mm", 0.0))
+            except Exception:
+                continue
+            if math.isfinite(p):
+                by_t[t] = p
+    return [{"t": t, "precip_mm": by_t[t]} for t in sorted(by_t.keys())]
+
+
+def _choose_icon2d_host_mode(start_iso: str, end_iso: str) -> str:
+    start_dt = dt.datetime.fromisoformat(start_iso.replace("Z", "+00:00")).astimezone(dt.timezone.utc)
+    end_dt = dt.datetime.fromisoformat(end_iso.replace("Z", "+00:00")).astimezone(dt.timezone.utc)
+    cutoff = (dt.datetime.now(tz=dt.timezone.utc) - dt.timedelta(days=MIXED_CUTOFF_DAYS)).replace(
+        hour=23, minute=59, second=59, microsecond=0
+    )
+    if end_dt <= cutoff:
+        return "historical"
+    if start_dt >= cutoff:
+        return "live"
+    return "mixed"
+
+
+def _icon2d_smart_fetch_open_meteo(points: list[tuple[float, float]], start_iso: str, end_iso: str) -> list[dict]:
+    mode = _choose_icon2d_host_mode(start_iso, end_iso)
+    if mode == "historical":
+        return _icon2d_fetch_batch_all_open_meteo(points, start_iso, end_iso, live=False)
+    if mode == "live":
+        return _icon2d_fetch_batch_all_open_meteo(points, start_iso, end_iso, live=True)
+
+    cutoff = (dt.datetime.now(tz=dt.timezone.utc) - dt.timedelta(days=MIXED_CUTOFF_DAYS)).replace(
+        hour=23, minute=59, second=59, microsecond=0
+    )
+    cutoff_iso = cutoff.isoformat().replace("+00:00", "Z")
+    hist = _icon2d_fetch_batch_all_open_meteo(points, start_iso, cutoff_iso, live=False)
+    live = _icon2d_fetch_batch_all_open_meteo(points, cutoff_iso, end_iso, live=True)
+
+    out: list[dict] = []
+    n = max(len(hist), len(live), len(points))
+    for idx in range(n):
+        lat, lon = points[idx] if idx < len(points) else (0.0, 0.0)
+        hp = hist[idx] if idx < len(hist) else {"series": [], "station": {}}
+        lp = live[idx] if idx < len(live) else {"series": [], "station": {}}
+        out.append(
+            {
+                "point": _normalize_point_key(lat, lon),
+                "station": lp.get("station") or hp.get("station") or {"source": "Open-Meteo ICON-D2", "model": MODEL},
+                "series": _merge_point_series(hp.get("series") or [], lp.get("series") or []),
+            }
+        )
+    return out
+
+
+def _fetch_batch_icon2d(points: list[tuple[float, float]], start_iso: str, end_iso: str, agg: str = "hourly") -> list[dict]:
+    transport = _icon2d_transport()
+    base = _icon2d_base_url()
+    if transport == "proxy":
+        return _fetch_batch_icon2d_proxy(points, start_iso, end_iso, agg)
+    if transport == "direct":
+        return _icon2d_smart_fetch_open_meteo(points, start_iso, end_iso)
+
+    # auto: prefer local proxy when configured, fallback to direct Open-Meteo.
+    if base:
+        try:
+            return _fetch_batch_icon2d_proxy(points, start_iso, end_iso, agg)
+        except Exception:
+            pass
+    return _icon2d_smart_fetch_open_meteo(points, start_iso, end_iso)
 
 
 def _fetch_batch_dwd(points: list[tuple[float, float]], start_iso: str, end_iso: str) -> list[dict]:
@@ -259,9 +439,9 @@ def fetch_batch(points: list[tuple[float, float]], start_iso: str, end_iso: str,
     Batch fetch a compact hourly precipitation series for each point.
 
     Provider strategy:
-      - WEATHER_PROVIDER=icon2d: require ICON2D endpoint
-      - WEATHER_PROVIDER=dwd: station-based DWD
-      - WEATHER_PROVIDER=auto (default): try icon2d when configured, fallback to DWD
+      - WEATHER_PROVIDER=icon2d: ICON-D2 (Open-Meteo / proxy)
+      - WEATHER_PROVIDER=dwd: station-based DWD (legacy/explicit)
+      - WEATHER_PROVIDER=auto: behaves like icon2d (no silent DWD fallback)
     """
     mode = _provider_mode()
     key = f"{mode}:{_cache_key(points, start_iso, end_iso, agg)}"
@@ -270,19 +450,10 @@ def fetch_batch(points: list[tuple[float, float]], start_iso: str, end_iso: str,
         return cached  # type: ignore[return-value]
 
     data: list[dict]
-    if mode == "icon2d":
-        data = _fetch_batch_icon2d(points, start_iso, end_iso, agg)
-    elif mode == "dwd":
+    if mode == "dwd":
         data = _fetch_batch_dwd(points, start_iso, end_iso)
     else:
-        # auto
-        if _icon2d_base_url():
-            try:
-                data = _fetch_batch_icon2d(points, start_iso, end_iso, agg)
-            except Exception:
-                data = _fetch_batch_dwd(points, start_iso, end_iso)
-        else:
-            data = _fetch_batch_dwd(points, start_iso, end_iso)
+        data = _fetch_batch_icon2d(points, start_iso, end_iso, agg)
 
     _cache_set(key, data)
     return data

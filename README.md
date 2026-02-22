@@ -77,21 +77,42 @@ Vite env vars (optional):
 
 ## Weather Provider Mode
 Backend env vars (optional):
-- `WEATHER_PROVIDER=auto|icon2d|dwd` (default `auto`)
-- `ICON2D_BASE_URL` (required for `icon2d`, optional for `auto`)
+- `WEATHER_PROVIDER=auto|icon2d|dwd` (default `icon2d`)
+- `ICON2D_TRANSPORT=direct|proxy|auto` (default `direct`)
+- `ICON2D_BASE_URL` (used for `proxy`, optional in `auto`)
 - `ICON2D_BATCH_PATH` (default `/weather/batch`)
 - `ICON2D_TIMEOUT_S` (default `45`)
 
 Behavior:
-- `auto`: tries icon2d first (if configured), then falls back to DWD station-based data.
-- `icon2d`: uses only icon2d backend (fails if unavailable).
+- `auto`: behaves like `icon2d` (no silent DWD fallback).
+- `icon2d`: uses ICON-D2 (direct Open-Meteo or proxy, depending on `ICON2D_TRANSPORT`).
 - `dwd`: uses only DWD station-based data.
+
+Weather API (legacy backend):
+- `GET /abflussatlas/weather/stats` -> quantiles + API14
+- `GET /abflussatlas/weather/events` -> automatic Starkregen events (1h/6h thresholds), source-selectable:
+  - `source=icon2d|dwd|radar|hybrid|hybrid_radar`
+- `GET /abflussatlas/weather/preset` -> compact UI preset (moisture + rain bands)
+
+Frontend UX default:
+- No source checkboxes in the main UI.
+- Weather is placed before analysis in the sidebar flow (`Gebiet -> Wetter -> Analyse`).
+- Date range + `Uebernehmen` triggers weather/event calculation.
+- Event selection is done via bar-chart only; selected bar is passed to analysis.
+- AOI sampling is automatic (small AOI: 1 point, medium: 5 points, large: 9 points).
+- UI does not expose provider/source controls.
+
+Radar source (hybrid events):
+- Default: built-in DWD RADOLAN CDC reader (`RADAR_PROVIDER=dwd_radolan`)
+- Optional connector: `RADAR_PROVIDER=connector` + `RADAR_EVENTS_URL=https://...`
+- `RADAR_TIMEOUT_S=30`, `RADAR_MAX_HOURS=4320`, `RADAR_CACHE_DIR=./backend/.cache/radolan`
+- If radar is unavailable in the selected window, `hybrid_radar` falls back and reports reason in response meta.
 
 ## Disclaimer
 Dies ist eine indikative Analyse basierend auf Topographiedaten. Keine rechtsverbindliche Hochwasservorsorge.
 
 ## Hilfe & Methodik
-- In-App Hilfe: Sidebar -> "Hilfe & Methodik"
+- In-App Hilfe/Datenbasis: top-right `i` button ("Daten & Quellen")
 - Ausfuehrliche Doku: `HILFE_WISSENSCHAFT.md`
 - Roadmap (geordnet): `ROADMAP.md`
 
@@ -141,16 +162,17 @@ Bootstrap once manually:
 run_layer_bootstrap.bat
 ```
 
-### BK50 to Soil Raster
-BK50 comes as GeoPackage and must be rasterized before use as `SOIL_RASTER_PATH`.
+### Soil Raster (Sachsen-Anhalt, konkret)
+For Sachsen-Anhalt use a BGR BUEK250-based GeoPackage/raster and set it as `SOIL_RASTER_PATH`.
+The converter workflow stays the same (inspect layer/field, then rasterize):
 
 Inspect layers/fields:
 ```bat
-run_soil_bk50_converter.bat --input-gpkg C:\data\ISBK50.gpkg --list-only
+run_soil_bk50_converter.bat --input-gpkg C:\data\buek250_sa.gpkg --list-only
 ```
 
 Convert with chosen numeric field:
 ```bat
-run_soil_bk50_converter.bat --input-gpkg C:\data\ISBK50.gpkg --layer <LAYER> --value-field <NUMERIC_FIELD> --output-tif C:\data\nrw_soil.tif
+run_soil_bk50_converter.bat --input-gpkg C:\data\buek250_sa.gpkg --layer <LAYER> --value-field <NUMERIC_FIELD> --output-tif C:\data\sa_soil_buek250.tif
 ```
 

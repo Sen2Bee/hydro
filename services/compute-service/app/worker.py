@@ -176,10 +176,36 @@ def resolve_dem_path(parameters: dict) -> tuple[str, str | None]:
 def run_pysheds_compute(job_id: UUID, model_id: UUID, parameters: dict) -> dict:
     threshold = int(parameters.get("threshold", 200))
     analysis_type = str(parameters.get("analysis_type") or "starkregen").strip().lower()
+    weather_context: dict[str, Any] | None = None
+    if analysis_type == "starkregen":
+        # Jobs-mode parity with legacy /analyze-bbox:
+        # when a weather event is selected in UI, use its 1h intensity as scenario driver.
+        try:
+            mm_h_raw = parameters.get("weather_event_mm_h")
+            mm_h = float(mm_h_raw) if mm_h_raw is not None else float("nan")
+            if mm_h == mm_h and mm_h > 0.0:  # finite + positive
+                s1 = int(max(5, min(300, round(mm_h * 0.8))))
+                s2 = int(max(5, min(300, round(mm_h * 1.0))))
+                s3 = int(max(5, min(300, round(mm_h * 1.2))))
+                weather_context = {
+                    "source": "weather_event_selected",
+                    "mode_used": "selected_event",
+                    "moisture_class": "normal",
+                    "rain_proxy": max(0.35, min(0.95, mm_h / 60.0)),
+                    "scenario_mm_per_h": sorted({s1, s2, s3}),
+                    "event_peak_ts": parameters.get("weather_event_peak_ts"),
+                }
+        except Exception:
+            weather_context = None
 
     dem_path, cleanup_dir = resolve_dem_path(parameters)
     try:
-        geojson = analyze_dem(dem_path, threshold=threshold, analysis_type=analysis_type)
+        geojson = analyze_dem(
+            dem_path,
+            threshold=threshold,
+            analysis_type=analysis_type,
+            weather_context=weather_context,
+        )
     finally:
         if cleanup_dir and os.path.isdir(cleanup_dir):
             shutil.rmtree(cleanup_dir, ignore_errors=True)
