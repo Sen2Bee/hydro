@@ -33,3 +33,31 @@ backend/data/
 *.grib
 *.grib2
 *.nc
+
+# Local scratch / ad-hoc fetch artifacts
+temp_*
+
+# Paper pipeline runtime artifacts (generated)
+paper/cache/
+paper/exports/
+paper/input/sa_chunks*/
+paper/input/sa_precompute_chunks/
+paper/input/event_probe_*.geojson
+paper/input/schlaege_*.geojson
+paper/input/schlaege_*.meta.json
+paper/input/schlaege.geojson
+paper/input/schlaege.meta.json
+paper/manifest/
+
+# Geodata (vector / exchange formats) - keep out of git by default
+*.geojson
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.kml
+*.kmz
+*.gml
+*.gpkg
+*.fgb
