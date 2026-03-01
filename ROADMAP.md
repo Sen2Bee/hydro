@@ -116,3 +116,16 @@ Ziel: Praxisnutzen (Priorisierung + Wirksamkeit), ohne Simulation zu versprechen
   - Starkregen nutzt automatisch: Wetter + Versiegelung + Vorflut/OSM.
   - Erosion nutzt automatisch: Boden + Landbedeckung + Saison-Preset.
   - Optional Toggle: "Mehr Kontext" (zeigt zusaetzliche Overlays).
+
+## 8) Integrationspfad ABAG + Event-ML (neu)
+Ziel: zwei komplementaere Erosionsmodi produktiv machen, ohne den bestehenden MVP-Flow zu brechen:
+- `ABAG` fuer langfristiges Erosionsrisiko (klassisch, deutschlandweit skalierbar)
+- `Event-ML` fuer Lokalisierung konkreter Erosionsereignisse (datengetrieben, ereignisnah)
+
+Verbindliche Leitplanken:
+- Kein Modus-Mix: ABAG und Event-ML bleiben methodisch getrennt.
+- Einheitliches Response-Schema (`analysis`, `hotspots`, `assumptions`, `sources`) fuer UI-Stabilitaet.
+- Klare Kennzeichnung in UX/Export: `langfristiger_index` vs. `ereignis_wahrscheinlichkeit`.
+
+Umsetzungsdetails und Dateiplan:
+- Siehe `KONZEPT_EROSION_ABAG_ML.md`.

@@ -54,10 +54,68 @@ The compute worker supports two DEM input modes via `model_runs.parameters`:
 
 Optional parameters:
 - `threshold` (int, default `200`)
+- `analysis_type` (`starkregen` | `erosion` | `abag` | `erosion_events_ml`, default `starkregen`)
+- `abag_p_factor` (optional float `0.1..1.5`, only relevant for `analysis_type=abag`)
 - `provider` (`auto`, `nrw`, `sachsen-anhalt`)
 - `dem_source` (`wcs` or `public` for Sachsen-Anhalt DGM1 ZIP fallback)
 - `st_parts` (list or comma string, e.g. `[1,2]` or `"1,2"`)
 - `dem_cache_dir` (optional cache folder for public downloads)
+
+Event-ML (`analysis_type=erosion_events_ml`) parameters:
+- `event_start_iso` and `event_end_iso` (required, ISO-8601)
+- `ml_model_key` (optional; can resolve to `backend/models/event_ml/<key>.joblib|.pkl|.pickle|.json`)
+- `ml_severity_model_key` (optional; multiclass severity model artifact key/path)
+- `ml_threshold` (optional float, `0.05..0.95`, default `0.50`)
+
+Event-ML model artifact resolution order:
+1. `ml_model_key` as existing file path
+2. `EROSION_EVENT_ML_ARTIFACT_<SANITIZED_KEY>`
+3. `EROSION_EVENT_ML_ARTIFACT`
+4. `backend/models/event_ml/<ml_model_key>.joblib|.pkl|.pickle|.json`
+
+## Event-ML Training (v1)
+Train a RandomForest model from CSV (NowCastR sample by default):
+
+```bash
+python backend/train_erosion_event_ml.py
+```
+
+Custom paths:
+
+```bash
+python backend/train_erosion_event_ml.py \
+  --input-csv path/to/training.csv \
+  --output-model backend/models/event_ml/event-ml-rf-v1.joblib \
+  --output-metrics backend/models/event_ml/event-ml-rf-v1.metrics.json
+```
+
+Use in analysis:
+- `analysis_type=erosion_events_ml`
+- `event_start_iso=...&event_end_iso=...`
+- `ml_model_key=event-ml-rf-v1` (resolved to `backend/models/event_ml/event-ml-rf-v1.joblib`)
+
+Train optional severity model (`Erosion_class` 1..3):
+
+```bash
+python backend/train_erosion_event_severity_ml.py
+```
+
+Use severity model in analysis:
+- add `ml_severity_model_key=event-ml-rf-severity-v1`
+
+One-command bundle (train + validate + manifest):
+
+```bat
+run_event_ml_bundle.bat
+```
+
+Bundle outputs:
+- `backend/models/event_ml/event-ml-rf-v1.joblib`
+- `backend/models/event_ml/event-ml-rf-severity-v1.joblib`
+- `backend/models/event_ml/event-ml-rf-v1.metrics.json`
+- `backend/models/event_ml/event-ml-rf-severity-v1.metrics.json`
+- `backend/models/event_ml/event-ml-bundle.manifest.json`
+- `backend/models/event_ml/event-ml-validation.json`
 
 Outputs:
 - `model_run_outputs.s3_key` is used when S3/MinIO is configured; otherwise result JSON is stored in `metadata`.
@@ -114,7 +172,16 @@ Dies ist eine indikative Analyse basierend auf Topographiedaten. Keine rechtsver
 ## Hilfe & Methodik
 - In-App Hilfe/Datenbasis: top-right `i` button ("Daten & Quellen")
 - Ausfuehrliche Doku: `HILFE_WISSENSCHAFT.md`
+- Stabile agrarische Datenquellen: `DATENQUELLEN_AGRAR_STABIL.md`
+- Reproduzierbare Laufdoku (Pflicht): `DOKUMENTATION_NACHVOLLZIEHBARKEIT.md`
+- Paper-Vorbereitung: `PAPER_PUBLISH_PREP.md`
+- Schlag x Ereignis Batch-Export: `run_field_event_batch.bat`
+- Smart Schlag x Ereignis Batch (auto-sampled): `run_field_event_batch_smart.bat`
+- SA-Chunk Merge + Gesamt-QA: `run_merge_sa_chunk_results.bat`
+- SA Schlag-Polygon-Import (ALKIS): `run_fetch_sa_flurstuecke.bat`
+- SA-weiter Flurstueck-Download (Tiles+Merge): `run_fetch_sa_flurstuecke_sa.bat`
 - Roadmap (geordnet): `ROADMAP.md`
+- Agenten-Arbeitsplan: `AGENT_WORKPLAN.md`
 
 ## WCS Large-Area Behavior
 - Adaptive WCS tiling is enabled for large AOIs (<=5km requests per tile, auto-splitting on proxy parameter errors).
@@ -154,6 +221,12 @@ You can override the cache folder via the UI ("Download-Ordner") or by setting `
 Optional external layers:
 - `SOIL_RASTER_PATH` / `SOIL_RASTER_URL`
 - `IMPERVIOUS_RASTER_PATH` / `IMPERVIOUS_RASTER_URL`
+- ABAG optional factor rasters (for `analysis_type=abag`):
+  - `ABAG_K_FACTOR_RASTER_PATH`
+  - `ABAG_R_FACTOR_RASTER_PATH`
+  - `ABAG_S_FACTOR_RASTER_PATH`
+  - `ABAG_C_FACTOR_RASTER_PATH`
+  - `ABAG_P_FACTOR_RASTER_PATH`
 
 If local files are missing and URLs are configured, layers are auto-fetched and cached.
 
@@ -161,6 +234,17 @@ Bootstrap once manually:
 ```bat
 run_layer_bootstrap.bat
 ```
+
+Build dynamic ABAG C-factor proxy for Sachsen-Anhalt (optional):
+```bat
+run_fetch_sentinel_ndvi.bat --west 11.80 --south 51.40 --east 12.10 --north 51.60 --start 2025-04-01 --end 2025-09-30
+run_build_c_factor_proxy.bat --west 11.80 --south 51.40 --east 12.10 --north 51.60
+```
+Output:
+- `data/layers/st_mwl_erosion/NDVI_latest.tif`
+- `data/layers/st_mwl_erosion/C_Faktor_proxy.tif`
+
+`run_backend.bat` auto-detects `C_Faktor_proxy.tif` and sets `ABAG_C_FACTOR_RASTER_PATH` automatically.
 
 ### Soil Raster (Sachsen-Anhalt, konkret)
 For Sachsen-Anhalt use a BGR BUEK250-based GeoPackage/raster and set it as `SOIL_RASTER_PATH`.
