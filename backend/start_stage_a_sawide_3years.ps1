@@ -1,6 +1,6 @@
 param(
   [string]$RepoRoot = "D:\__GeoFlux\hydrowatch",
-  [string]$PythonExe = "C:\Users\thoko\AppData\Local\Programs\Python\Python313\python.exe",
+  [string]$PythonExe = "",
   [string]$SourceSqlite = "data\raw\sa_flurstuecke\cache\flurstuecke.sqlite",
   [int]$ChunkSize = 1000,
   [int]$TopN = 5,
@@ -22,6 +22,28 @@ function Fmt([double]$v) {
   return $v.ToString([System.Globalization.CultureInfo]::InvariantCulture)
 }
 
+if ([string]::IsNullOrWhiteSpace($PythonExe)) {
+  if ($env:PYTHON_EXE -and (Test-Path $env:PYTHON_EXE)) {
+    $PythonExe = $env:PYTHON_EXE
+  } else {
+    $resolver = Join-Path $root "resolve_python.bat"
+    if (Test-Path $resolver) {
+      $resolved = cmd.exe /d /c "call `"$resolver`" && echo PYTHON_EXE=%PYTHON_EXE%"
+      if ($LASTEXITCODE -eq 0) {
+        $line = $resolved | Select-Object -Last 1
+        if ($line -match "^PYTHON_EXE=(.+)$" -and (Test-Path $Matches[1])) {
+          $PythonExe = $Matches[1]
+        }
+      }
+    }
+  }
+}
+if ([string]::IsNullOrWhiteSpace($PythonExe)) {
+  $cmd = Get-Command python -ErrorAction SilentlyContinue
+  if ($cmd) {
+    $PythonExe = $cmd.Source
+  }
+}
 if (-not (Test-Path $PythonExe)) {
   throw "Python nicht gefunden: $PythonExe"
 }
@@ -122,4 +144,3 @@ $obj = [pscustomobject]@{
 }
 $obj | ConvertTo-Json -Depth 6 | Set-Content -Path $manifest -Encoding UTF8
 Write-Host ("[OK] Manifest: {0}" -f $manifest)
-

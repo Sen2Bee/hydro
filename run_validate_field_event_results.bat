@@ -1,7 +1,11 @@
 @echo off
 setlocal
 set SCRIPT_DIR=%~dp0
-set PYTHON_EXE=C:\Users\thoko\AppData\Local\Programs\Python\Python313\python.exe
+call "%SCRIPT_DIR%resolve_python.bat"
+if errorlevel 1 (
+  echo [ERROR] Could not resolve Python interpreter.
+  exit /b 1
+)
 
 if "%~1"=="" (
   set CSV_PATH=paper\exports\field_event_results_sample.csv
@@ -29,4 +33,3 @@ if %EXIT_CODE%==0 (
 )
 
 exit /b %EXIT_CODE%
-

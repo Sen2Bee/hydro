@@ -38,6 +38,9 @@ from rasterio.transform import rowcol, xy
 from rasterio.warp import reproject, transform_bounds
 from rasterio.windows import from_bounds
 
+from erosion_abag import compute_abag_index
+from erosion_event_ml import infer_erosion_event_ml
+
 
 MAX_ANALYSIS_CELLS = 4_000_000
 MAX_OUTPUT_FEATURES = 4_000
@@ -347,6 +350,46 @@ def _resolve_external_factors(
     }
 
 
+def _resolve_abag_raster_factors(
+    *,
+    dem_shape: tuple[int, int],
+    dem_transform,
+    dem_crs: str | None,
+    aoi_buffer_m: float = DEFAULT_LAYER_AOI_BUFFER_M,
+) -> tuple[dict[str, np.ndarray | None], dict[str, str | None]]:
+    """
+    Resolve optional ABAG factor rasters from env paths and reproject them to DEM grid.
+
+    Supported env vars:
+    - ABAG_K_FACTOR_RASTER_PATH
+    - ABAG_R_FACTOR_RASTER_PATH
+    - ABAG_S_FACTOR_RASTER_PATH
+    - ABAG_C_FACTOR_RASTER_PATH
+    - ABAG_P_FACTOR_RASTER_PATH
+    """
+    k_path = os.getenv("ABAG_K_FACTOR_RASTER_PATH") or os.getenv("SOIL_RASTER_PATH")
+    r_path = os.getenv("ABAG_R_FACTOR_RASTER_PATH")
+    s_path = os.getenv("ABAG_S_FACTOR_RASTER_PATH")
+    c_path = os.getenv("ABAG_C_FACTOR_RASTER_PATH")
+    p_path = os.getenv("ABAG_P_FACTOR_RASTER_PATH")
+
+    factors = {
+        "k_factor_raster": _load_layer_to_dem_grid(k_path, dem_shape, dem_transform, dem_crs, aoi_buffer_m=aoi_buffer_m),
+        "r_factor_raster": _load_layer_to_dem_grid(r_path, dem_shape, dem_transform, dem_crs, aoi_buffer_m=aoi_buffer_m),
+        "s_factor_raster": _load_layer_to_dem_grid(s_path, dem_shape, dem_transform, dem_crs, aoi_buffer_m=aoi_buffer_m),
+        "c_factor_raster": _load_layer_to_dem_grid(c_path, dem_shape, dem_transform, dem_crs, aoi_buffer_m=aoi_buffer_m),
+        "p_factor_raster": _load_layer_to_dem_grid(p_path, dem_shape, dem_transform, dem_crs, aoi_buffer_m=aoi_buffer_m),
+    }
+    sources = {
+        "k_factor_raster_path": k_path if factors["k_factor_raster"] is not None else None,
+        "r_factor_raster_path": r_path if factors["r_factor_raster"] is not None else None,
+        "s_factor_raster_path": s_path if factors["s_factor_raster"] is not None else None,
+        "c_factor_raster_path": c_path if factors["c_factor_raster"] is not None else None,
+        "p_factor_raster_path": p_path if factors["p_factor_raster"] is not None else None,
+    }
+    return factors, sources
+
+
 def _prepare_analysis_dem(file_path: str) -> tuple[str, dict[str, Any]]:
     """Downsample very large rasters to keep runtime and memory bounded."""
     input_width = 0
@@ -585,6 +628,104 @@ def _build_hotspots(
     return hotspots
 
 
+def _build_hotspots_abag(
+    risk_score: np.ndarray,
+    acc: np.ndarray,
+    slope_deg: np.ndarray,
+    ls_factor: np.ndarray,
+    k_factor: np.ndarray,
+    c_factor: np.ndarray,
+    transform,
+    src_crs_str: str | None,
+    pixel_area_m2: float,
+    top_n: int = 8,
+) -> list[dict[str, Any]]:
+    mask = np.isfinite(risk_score)
+    indices = np.argwhere(mask)
+    if indices.size == 0:
+        return []
+
+    values = risk_score[mask]
+    order = np.argsort(values)[::-1]
+
+    to_wgs = None
+    if src_crs_str:
+        src_crs = CRS(src_crs_str)
+        if src_crs != CRS("EPSG:4326"):
+            to_wgs = Transformer.from_crs(src_crs, "EPSG:4326", always_xy=True)
+
+    selected: list[tuple[int, int]] = []
+    min_dist_px = 25
+    hotspots: list[dict[str, Any]] = []
+
+    finite_ls = ls_factor[np.isfinite(ls_factor)]
+    finite_k = k_factor[np.isfinite(k_factor)]
+    finite_c = c_factor[np.isfinite(c_factor)]
+    ls_p75 = float(np.nanpercentile(finite_ls, 75)) if finite_ls.size else 0.0
+    k_p75 = float(np.nanpercentile(finite_k, 75)) if finite_k.size else 0.0
+    c_p75 = float(np.nanpercentile(finite_c, 75)) if finite_c.size else 0.0
+
+    for ord_idx in order:
+        row_i, col_i = indices[ord_idx]
+        too_close = False
+        for prev_row, prev_col in selected:
+            if (row_i - prev_row) ** 2 + (col_i - prev_col) ** 2 < min_dist_px ** 2:
+                too_close = True
+                break
+        if too_close:
+            continue
+
+        score_val = float(risk_score[row_i, col_i])
+        acc_val = float(acc[row_i, col_i]) if np.isfinite(acc[row_i, col_i]) else 0.0
+        ls_val = float(ls_factor[row_i, col_i]) if np.isfinite(ls_factor[row_i, col_i]) else 0.0
+        k_val = float(k_factor[row_i, col_i]) if np.isfinite(k_factor[row_i, col_i]) else 0.0
+        c_val = float(c_factor[row_i, col_i]) if np.isfinite(c_factor[row_i, col_i]) else 0.0
+        slope_val = float(slope_deg[row_i, col_i]) if np.isfinite(slope_deg[row_i, col_i]) else 0.0
+
+        upstream_area_m2 = 0.0
+        upstream_area_km2 = 0.0
+        if acc_val > 0 and pixel_area_m2 > 0:
+            upstream_area_m2 = float(acc_val) * float(pixel_area_m2)
+            upstream_area_km2 = upstream_area_m2 / 1_000_000.0
+
+        reason_parts = []
+        if ls_val >= ls_p75:
+            reason_parts.append("hoher LS-Faktor (Hang + Abflussweg)")
+        if k_val >= k_p75:
+            reason_parts.append("erhoehter Boden-Erodierbarkeitsfaktor K")
+        if c_val >= c_p75:
+            reason_parts.append("erhoehter C-Faktor (Bedeckung/Management)")
+        if slope_val >= 12.0:
+            reason_parts.append("hohe Hangneigung")
+        if not reason_parts:
+            reason_parts.append("erhoehter ABAG-Gesamtindex")
+
+        x_coord, y_coord = xy(transform, int(row_i), int(col_i), offset="center")
+        lon, lat = (float(x_coord), float(y_coord))
+        if to_wgs is not None:
+            lon, lat = to_wgs.transform(lon, lat)
+
+        hotspots.append(
+            {
+                "rank": len(hotspots) + 1,
+                "lat": float(lat),
+                "lon": float(lon),
+                "risk_score": int(round(score_val)),
+                "risk_class": _risk_class(score_val),
+                "reason": " + ".join(reason_parts),
+                "upstream_area_m2": int(round(upstream_area_m2)),
+                "upstream_area_km2": round(upstream_area_km2, 6),
+                "hotspot_type": "abag",
+            }
+        )
+
+        selected.append((int(row_i), int(col_i)))
+        if len(hotspots) >= top_n:
+            break
+
+    return hotspots
+
+
 def _build_ponding_hotspots(
     ponding_depth_m: np.ndarray,
     acc: np.ndarray,
@@ -812,6 +953,12 @@ def analyze_dem(
     analysis_type: str = "starkregen",
     aoi_polygon: list[list[float]] | None = None,
     weather_context: dict[str, Any] | None = None,
+    event_start_iso: str | None = None,
+    event_end_iso: str | None = None,
+    ml_model_key: str | None = None,
+    ml_severity_model_key: str | None = None,
+    ml_threshold: float = 0.50,
+    abag_p_factor: float | None = None,
 ) -> dict:
     """Run full flow accumulation analysis and return enriched GeoJSON."""
 
@@ -920,11 +1067,58 @@ def analyze_dem(
         weather_moisture_class = str(weather_context.get("moisture_class") or weather_moisture_class)
 
     rain_hist_proxy = np.full(acc_norm.shape, rain_proxy_value, dtype=float)
+    abag_bundle: dict[str, Any] | None = None
+    abag_factor_sources: dict[str, str | None] = {}
+    event_ml_bundle: dict[str, Any] | None = None
 
     # Default: Starkregen-Screening (Score v2).
     # Erosion MVP: topographischer Treiber (LS-Proxy) ohne Anspruch auf Gutachten.
     scenarios = []
-    if analysis_type == "erosion":
+    if analysis_type == "abag":
+        valid_mask_abag = np.isfinite(dem_arr) & np.isfinite(acc_arr)
+        abag_factor_rasters, abag_factor_sources = _resolve_abag_raster_factors(
+            dem_shape=dem_arr.shape,
+            dem_transform=transform,
+            dem_crs=src_crs,
+            aoi_buffer_m=layer_info.get("layer_aoi_buffer_m") or DEFAULT_LAYER_AOI_BUFFER_M,
+        )
+        abag_bundle = compute_abag_index(
+            acc_cells=acc_arr,
+            slope_deg=slope_deg,
+            soil_risk=soil_risk,
+            impervious_risk=impervious_risk,
+            pixel_area_m2=pixel_area_m2,
+            valid_mask=valid_mask_abag,
+            p_factor_override=abag_p_factor,
+            r_factor_raster=abag_factor_rasters.get("r_factor_raster"),
+            k_factor_raster=abag_factor_rasters.get("k_factor_raster"),
+            s_factor_raster=abag_factor_rasters.get("s_factor_raster"),
+            c_factor_raster=abag_factor_rasters.get("c_factor_raster"),
+            p_factor_raster=abag_factor_rasters.get("p_factor_raster"),
+        )
+        risk_norm = np.asarray(abag_bundle["risk_norm"], dtype=float)
+        risk_score = np.asarray(abag_bundle["risk_score"], dtype=float)
+        model_version = str(((abag_bundle.get("meta") or {}).get("model_version")) or "abag-v1-proxy")
+        rain_history_assumption = "n/a"
+    elif analysis_type == "erosion_events_ml":
+        event_ml_bundle = infer_erosion_event_ml(
+            acc_cells=acc_arr,
+            slope_deg=slope_deg,
+            soil_risk=soil_risk,
+            impervious_risk=impervious_risk,
+            valid_mask=np.isfinite(dem_arr) & np.isfinite(acc_arr),
+            weather_context=weather_context,
+            event_start_iso=event_start_iso,
+            event_end_iso=event_end_iso,
+            ml_model_key=(ml_model_key or "event-ml-rf-v1-placeholder"),
+            ml_severity_model_key=ml_severity_model_key,
+            ml_threshold=ml_threshold,
+        )
+        risk_norm = np.asarray(event_ml_bundle["risk_norm"], dtype=float)
+        risk_score = np.asarray(event_ml_bundle["risk_score"], dtype=float)
+        model_version = str(((event_ml_bundle.get("meta") or {}).get("model_version")) or "event-ml-v1-placeholder")
+        rain_history_assumption = "event_window_proxy"
+    elif analysis_type == "erosion":
         drv = np.nan_to_num(acc_norm, nan=0.0) * np.nan_to_num(slope_norm, nan=0.0)
         drv_norm = _normalize(drv)
         risk_norm = drv_norm
@@ -971,6 +1165,40 @@ def analyze_dem(
             props["upstream_area_km2"] = round(upstream_area_m2 / 1_000_000.0, 6)
         if slope_mid is not None:
             props["slope_deg"] = round(float(slope_mid), 1)
+        if analysis_type == "erosion_events_ml" and event_ml_bundle is not None:
+            ev = event_ml_bundle.get("features") or {}
+            sev = event_ml_bundle.get("severity")
+            p_mid = _sample_value(np.asarray(event_ml_bundle.get("risk_norm")), transform, midpoint[0], midpoint[1])
+            if p_mid is not None:
+                props["event_probability"] = round(float(p_mid), 3)
+            if isinstance(sev, np.ndarray):
+                s_mid = _sample_value(sev.astype(float), transform, midpoint[0], midpoint[1])
+                if s_mid is not None:
+                    props["event_severity_class"] = int(round(float(s_mid)))
+            for key in ("RadolanMax", "RadolanSum", "NDVI"):
+                arr = ev.get(key)
+                if isinstance(arr, np.ndarray):
+                    v = _sample_value(arr, transform, midpoint[0], midpoint[1])
+                    if v is not None:
+                        props[f"ml_{key.lower()}"] = round(float(v), 3)
+        if analysis_type == "abag" and abag_bundle is not None:
+            factors = abag_bundle.get("factors") or {}
+            a_arr = factors.get("a_index")
+            ls_arr = factors.get("ls_factor")
+            k_arr = factors.get("k_factor")
+            c_arr = factors.get("c_factor")
+            a_mid = _sample_value(a_arr, transform, midpoint[0], midpoint[1]) if isinstance(a_arr, np.ndarray) else None
+            ls_mid = _sample_value(ls_arr, transform, midpoint[0], midpoint[1]) if isinstance(ls_arr, np.ndarray) else None
+            k_mid = _sample_value(k_arr, transform, midpoint[0], midpoint[1]) if isinstance(k_arr, np.ndarray) else None
+            c_mid = _sample_value(c_arr, transform, midpoint[0], midpoint[1]) if isinstance(c_arr, np.ndarray) else None
+            if a_mid is not None:
+                props["abag_index"] = round(float(a_mid), 3)
+            if ls_mid is not None:
+                props["abag_ls_factor"] = round(float(ls_mid), 3)
+            if k_mid is not None:
+                props["abag_k_factor"] = round(float(k_mid), 4)
+            if c_mid is not None:
+                props["abag_c_factor"] = round(float(c_mid), 4)
 
     if src_crs:
         progress(7, 7, "Koordinaten werden transformiert...")
@@ -1040,19 +1268,39 @@ def analyze_dem(
     reduced_features, truncated = _limit_output_features(features)
     branches["features"] = reduced_features
 
-    hotspots = _build_hotspots(
-        risk_score=risk_score,
-        acc=acc_arr,
-        slope_deg=slope_deg,
-        soil_risk=soil_risk,
-        impervious_risk=impervious_risk,
-        transform=transform,
-        src_crs_str=src_crs,
-        pixel_area_m2=pixel_area_m2,
-    )
+    if analysis_type == "abag" and abag_bundle is not None:
+        f = abag_bundle.get("factors") or {}
+        ls_arr = f.get("ls_factor")
+        k_arr = f.get("k_factor")
+        c_arr = f.get("c_factor")
+        if isinstance(ls_arr, np.ndarray) and isinstance(k_arr, np.ndarray) and isinstance(c_arr, np.ndarray):
+            hotspots = _build_hotspots_abag(
+                risk_score=risk_score,
+                acc=acc_arr,
+                slope_deg=slope_deg,
+                ls_factor=ls_arr,
+                k_factor=k_arr,
+                c_factor=c_arr,
+                transform=transform,
+                src_crs_str=src_crs,
+                pixel_area_m2=pixel_area_m2,
+            )
+        else:
+            hotspots = []
+    else:
+        hotspots = _build_hotspots(
+            risk_score=risk_score,
+            acc=acc_arr,
+            slope_deg=slope_deg,
+            soil_risk=soil_risk,
+            impervious_risk=impervious_risk,
+            transform=transform,
+            src_crs_str=src_crs,
+            pixel_area_m2=pixel_area_m2,
+        )
 
-    # Starkregen: add a few dedicated ponding/sink hotspots (from depression fill depth).
-    if analysis_type != "erosion":
+    # Starkregen only: add dedicated ponding/sink hotspots.
+    if analysis_type == "starkregen":
         pond_hotspots = _build_ponding_hotspots(
             ponding_depth_m=ponding_depth_m,
             acc=acc_arr,
@@ -1087,17 +1335,59 @@ def analyze_dem(
     for score_val in risk_score[valid_mask]:
         class_counts[_risk_class(float(score_val))] += 1
 
+    total_cells = int(dem_arr.size)
+    valid_cells = int(np.sum(valid_mask))
+    nodata_cells = max(0, total_cells - valid_cells)
+    valid_share = (float(valid_cells) / float(total_cells)) if total_cells > 0 else 0.0
+    nodata_share = (float(nodata_cells) / float(total_cells)) if total_cells > 0 else 0.0
+
     metrics = {
         "feature_count": int(full_feature_count),
         "feature_count_output": int(len(reduced_features)),
         "network_length_km": round(_network_length_km(features), 2),
         "aoi_area_km2": round(float(np.sum(valid_mask) * pixel_area_m2 / 1_000_000.0), 3),
-        "risk_score_mean": int(round(float(np.nanmean(risk_score[valid_mask])))) if np.any(valid_mask) else 0,
-        "risk_score_max": int(round(float(np.nanmax(risk_score[valid_mask])))) if np.any(valid_mask) else 0,
         "threshold": int(threshold),
         "model_version": model_version,
+        "dem_valid_cell_share": round(valid_share, 6),
+        "dem_nodata_cell_share": round(nodata_share, 6),
+        "nodata_only": bool(valid_cells == 0),
     }
-    if analysis_type != "erosion":
+    if analysis_type == "abag" and abag_bundle is not None:
+        factors = abag_bundle.get("factors") or {}
+        a_idx = factors.get("a_index")
+        a_vals = a_idx[valid_mask] if isinstance(a_idx, np.ndarray) else np.array([])
+        a_vals = a_vals[np.isfinite(a_vals)] if isinstance(a_vals, np.ndarray) else np.array([])
+        metrics["metric_type"] = "long_term_index_proxy"
+        metrics["risk_score_mean"] = int(round(float(np.nanmean(risk_score[valid_mask])))) if np.any(valid_mask) else 0
+        metrics["risk_score_max"] = int(round(float(np.nanmax(risk_score[valid_mask])))) if np.any(valid_mask) else 0
+        if a_vals.size:
+            metrics["abag_index_mean"] = round(float(np.nanmean(a_vals)), 3)
+            metrics["abag_index_p90"] = round(float(np.nanpercentile(a_vals, 90)), 3)
+            metrics["abag_index_max"] = round(float(np.nanmax(a_vals)), 3)
+        else:
+            metrics["abag_index_mean"] = 0.0
+            metrics["abag_index_p90"] = 0.0
+            metrics["abag_index_max"] = 0.0
+    elif analysis_type == "erosion_events_ml" and event_ml_bundle is not None:
+        risk_vals = risk_norm[valid_mask] if np.any(valid_mask) else np.array([])
+        risk_vals = risk_vals[np.isfinite(risk_vals)] if isinstance(risk_vals, np.ndarray) else np.array([])
+        metrics["metric_type"] = "event_probability"
+        metrics["risk_score_mean"] = int(round(float(np.nanmean(risk_score[valid_mask])))) if np.any(valid_mask) else 0
+        metrics["risk_score_max"] = int(round(float(np.nanmax(risk_score[valid_mask])))) if np.any(valid_mask) else 0
+        metrics["event_probability_mean"] = round(float(np.nanmean(risk_vals)), 3) if risk_vals.size else 0.0
+        metrics["event_probability_p90"] = round(float(np.nanpercentile(risk_vals, 90)), 3) if risk_vals.size else 0.0
+        metrics["event_probability_max"] = round(float(np.nanmax(risk_vals)), 3) if risk_vals.size else 0.0
+        ev_mask = event_ml_bundle.get("event_detected")
+        if isinstance(ev_mask, np.ndarray) and np.any(valid_mask):
+            vals = ev_mask[valid_mask]
+            metrics["event_detected_share_percent"] = round(float(np.mean(vals.astype(float)) * 100.0), 1)
+        else:
+            metrics["event_detected_share_percent"] = 0.0
+    else:
+        metrics["risk_score_mean"] = int(round(float(np.nanmean(risk_score[valid_mask])))) if np.any(valid_mask) else 0
+        metrics["risk_score_max"] = int(round(float(np.nanmax(risk_score[valid_mask])))) if np.any(valid_mask) else 0
+
+    if analysis_type == "starkregen":
         pond_mask = np.isfinite(ponding_depth_m) & (ponding_depth_m > 0.0) & valid_mask
         if np.any(pond_mask):
             metrics["ponding_area_km2"] = round(float(np.sum(pond_mask) * pixel_area_m2 / 1_000_000.0), 3)
@@ -1108,8 +1398,50 @@ def analyze_dem(
             metrics["ponding_volume_m3"] = 0
             metrics["ponding_max_depth_m"] = 0.0
 
-    if analysis_type != "erosion":
+    if analysis_type == "starkregen":
         scenarios = [_scenario_summary(risk_norm, valid_mask, int(mm)) for mm in weather_scenarios_mm_h]
+
+    assumptions = {
+        "soil": layer_info["soil_source"],
+        "impervious": layer_info["impervious_source"],
+        "soil_path": layer_info["soil_path"],
+        "impervious_path": layer_info["impervious_path"],
+        "layer_aoi_buffer_m": layer_info["layer_aoi_buffer_m"],
+    }
+    if analysis_type == "abag" and abag_bundle is not None:
+        assumptions.update((abag_bundle.get("meta") or {}).get("assumptions") or {})
+        if abag_p_factor is not None:
+            assumptions["abag_p_factor_input"] = round(float(abag_p_factor), 3)
+        assumptions.update(
+            {
+                "abag_k_factor_raster_path": abag_factor_sources.get("k_factor_raster_path"),
+                "abag_r_factor_raster_path": abag_factor_sources.get("r_factor_raster_path"),
+                "abag_s_factor_raster_path": abag_factor_sources.get("s_factor_raster_path"),
+                "abag_c_factor_raster_path": abag_factor_sources.get("c_factor_raster_path"),
+                "abag_p_factor_raster_path": abag_factor_sources.get("p_factor_raster_path"),
+            }
+        )
+    elif analysis_type == "erosion_events_ml" and event_ml_bundle is not None:
+        assumptions.update((event_ml_bundle.get("meta") or {}).get("assumptions") or {})
+        assumptions.update(
+            {
+                "event_start_iso": event_start_iso,
+                "event_end_iso": event_end_iso,
+                "ml_model_key": (event_ml_bundle.get("meta") or {}).get("model_key"),
+                "ml_severity_model_key": ((event_ml_bundle.get("meta") or {}).get("severity") or {}).get("model_key"),
+                "ml_threshold": (event_ml_bundle.get("meta") or {}).get("decision_threshold"),
+            }
+        )
+    else:
+        assumptions.update(
+            {
+                "rain_history": rain_history_assumption,
+                "rain_proxy": round(float(rain_proxy_value), 3),
+                "weather_source": weather_source,
+                "weather_mode": weather_mode_used,
+                "weather_moisture_class": weather_moisture_class,
+            }
+        )
 
     branches["analysis"] = {
         "kind": analysis_type,
@@ -1117,18 +1449,7 @@ def analyze_dem(
         "class_distribution": class_counts,
         "hotspots": hotspots,
         "scenarios": scenarios,
-        "assumptions": {
-            "soil": layer_info["soil_source"],
-            "impervious": layer_info["impervious_source"],
-            "rain_history": rain_history_assumption,
-            "rain_proxy": round(float(rain_proxy_value), 3),
-            "weather_source": weather_source,
-            "weather_mode": weather_mode_used,
-            "weather_moisture_class": weather_moisture_class,
-            "soil_path": layer_info["soil_path"],
-            "impervious_path": layer_info["impervious_path"],
-            "layer_aoi_buffer_m": layer_info["layer_aoi_buffer_m"],
-        },
+        "assumptions": assumptions,
         "performance": {
             **prep_info,
             "output_truncated": bool(truncated),
@@ -1136,6 +1457,24 @@ def analyze_dem(
             "max_line_points": MAX_LINE_POINTS,
         },
     }
+    if analysis_type == "abag" and abag_bundle is not None:
+        branches["analysis"]["sources"] = {
+            "soil": layer_info["soil_source"],
+            "cover": layer_info["impervious_source"],
+            "r_factor": "ABAG_R_FACTOR or ABAG_R_FACTOR_RASTER_PATH",
+            "k_factor": "ABAG_K_FACTOR_RASTER_PATH or SOIL_RASTER_PATH",
+            "s_factor": "ABAG_S_FACTOR_RASTER_PATH",
+            "c_factor": "ABAG_C_FACTOR_RASTER_PATH or cover_proxy",
+            "p_factor": "ABAG_P_FACTOR / request / ABAG_P_FACTOR_RASTER_PATH",
+        }
+        branches["analysis"]["factors"] = (abag_bundle.get("meta") or {}).get("factor_ranges") or {}
+    if analysis_type == "erosion_events_ml" and event_ml_bundle is not None:
+        branches["analysis"]["sources"] = {
+            "weather": str((weather_context or {}).get("source") or "proxy"),
+            "soil": layer_info["soil_source"],
+            "cover": layer_info["impervious_source"],
+        }
+        branches["analysis"]["feature_contract"] = (event_ml_bundle.get("meta") or {}).get("feature_contract") or []
 
     print(f"  Features: {full_feature_count} (output: {len(reduced_features)})")
     if temp_created:

@@ -1,9 +1,37 @@
 param(
-  [string]$PythonExe = "C:\Users\thoko\AppData\Local\Programs\Python\Python313\python.exe",
+  [string]$PythonExe = "",
   [string]$RepoRoot = "D:\__GeoFlux\hydrowatch"
 )
 
 $ErrorActionPreference = "Stop"
+$root = (Resolve-Path $RepoRoot).Path
+
+if ([string]::IsNullOrWhiteSpace($PythonExe)) {
+  if ($env:PYTHON_EXE -and (Test-Path $env:PYTHON_EXE)) {
+    $PythonExe = $env:PYTHON_EXE
+  } else {
+    $resolver = Join-Path $root "resolve_python.bat"
+    if (Test-Path $resolver) {
+      $resolved = cmd.exe /d /c "call `"$resolver`" && echo PYTHON_EXE=%PYTHON_EXE%"
+      if ($LASTEXITCODE -eq 0) {
+        $line = $resolved | Select-Object -Last 1
+        if ($line -match "^PYTHON_EXE=(.+)$" -and (Test-Path $Matches[1])) {
+          $PythonExe = $Matches[1]
+        }
+      }
+    }
+  }
+}
+if ([string]::IsNullOrWhiteSpace($PythonExe)) {
+  $cmd = Get-Command python -ErrorAction SilentlyContinue
+  if ($cmd) {
+    $PythonExe = $cmd.Source
+  }
+}
+if (-not (Test-Path $PythonExe)) {
+  throw "Python not found: $PythonExe"
+}
+
 $ts = Get-Date -Format "yyyyMMdd_HHmmss"
 $runRoot = Join-Path $RepoRoot ("paper\exports\automation\sa50k_3workers_" + $ts)
 New-Item -ItemType Directory -Force -Path $runRoot | Out-Null

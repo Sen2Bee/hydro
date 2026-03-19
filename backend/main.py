@@ -1,3 +1,4 @@
+import csv
 import json
 import math
 import os
@@ -5,8 +6,10 @@ import queue
 import shutil
 import tempfile
 import threading
+import traceback
 
 import datetime as dt
+from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,6 +41,37 @@ app.add_middleware(
 )
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _safe_read_json(path: Path) -> dict | None:
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return None
+
+
+def _latest_file(pattern: str) -> Path | None:
+    files = sorted(_repo_root().glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+    return files[0] if files else None
+
+
+def _read_top_rows(csv_path: Path, limit: int = 10) -> list[dict]:
+    out: list[dict] = []
+    if not csv_path.exists():
+        return out
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
+        r = csv.DictReader(f)
+        for idx, row in enumerate(r):
+            if idx >= max(1, int(limit)):
+                break
+            out.append(row)
+    return out
+
+
 class BboxRequest(BaseModel):
     south: float
     west: float
@@ -63,6 +97,45 @@ class WeatherRequest(BaseModel):
     east: float
     start: str | None = None  # YYYY-MM-DD
     end: str | None = None  # YYYY-MM-DD
+
+
+ALLOWED_ANALYSIS_TYPES = {"starkregen", "erosion", "abag", "erosion_events_ml"}
+
+
+def _normalize_analysis_type(value: str | None) -> str:
+    v = (value or "starkregen").strip().lower()
+    if v not in ALLOWED_ANALYSIS_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Ungueltiger analysis_type '{value}'. Erlaubt: {', '.join(sorted(ALLOWED_ANALYSIS_TYPES))}",
+        )
+    return v
+
+
+def _validate_event_ml_window(
+    *,
+    analysis_type: str,
+    event_start_iso: str | None,
+    event_end_iso: str | None,
+) -> tuple[str | None, str | None]:
+    if analysis_type != "erosion_events_ml":
+        return event_start_iso, event_end_iso
+    if not event_start_iso or not event_end_iso:
+        raise HTTPException(
+            status_code=400,
+            detail="analysis_type=erosion_events_ml braucht event_start_iso und event_end_iso.",
+        )
+    try:
+        s = dt.datetime.fromisoformat(str(event_start_iso).replace("Z", "+00:00"))
+        e = dt.datetime.fromisoformat(str(event_end_iso).replace("Z", "+00:00"))
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Ungueltiges Event-Zeitformat. Verwende ISO-8601, z.B. 2025-07-14T12:00:00Z",
+        )
+    if e <= s:
+        raise HTTPException(status_code=400, detail="event_end_iso muss nach event_start_iso liegen.")
+    return event_start_iso, event_end_iso
 
 
 def _bbox_area_km2(south: float, west: float, north: float, east: float) -> float:
@@ -563,7 +636,13 @@ def _stream_threaded(run_fn):
             result = run_fn(lambda event: q.put(event))
             q.put({"type": "result", "data": result})
         except Exception as exc:
-            q.put({"type": "error", "detail": str(exc)})
+            q.put(
+                {
+                    "type": "error",
+                    "detail": str(exc),
+                    "traceback": traceback.format_exc(),
+                }
+            )
         finally:
             q.put(sentinel)
 
@@ -581,6 +660,12 @@ async def analyze_endpoint(
     file: UploadFile = File(...),
     threshold: int = Query(200, ge=10, le=5000),
     analysis_type: str = Query("starkregen"),
+    abag_p_factor: float | None = Query(None, ge=0.1, le=1.5),
+    event_start_iso: str | None = Query(None),
+    event_end_iso: str | None = Query(None),
+    ml_model_key: str | None = Query(None),
+    ml_severity_model_key: str | None = Query(None),
+    ml_threshold: float = Query(0.50, ge=0.05, le=0.95),
 ):
     """Accept a GeoTIFF DEM, return streamed progress + GeoJSON."""
 
@@ -590,6 +675,13 @@ async def analyze_endpoint(
         tmp_path = tmp.name
 
     total_steps = 7
+
+    analysis_type = _normalize_analysis_type(analysis_type)
+    event_start_iso, event_end_iso = _validate_event_ml_window(
+        analysis_type=analysis_type,
+        event_start_iso=event_start_iso,
+        event_end_iso=event_end_iso,
+    )
 
     def run(emit):
         def on_progress(step, _total, msg):
@@ -606,6 +698,12 @@ async def analyze_endpoint(
                 threshold=threshold,
                 progress_callback=on_progress,
                 analysis_type=analysis_type,
+                abag_p_factor=abag_p_factor,
+                event_start_iso=event_start_iso,
+                event_end_iso=event_end_iso,
+                ml_model_key=ml_model_key,
+                ml_severity_model_key=ml_severity_model_key,
+                ml_threshold=ml_threshold,
             )
         finally:
             try:
@@ -626,12 +724,18 @@ async def analyze_bbox_endpoint(
     provider: str = Query("auto"),
     dem_source: str = Query("wcs"),
     analysis_type: str = Query("starkregen"),
+    abag_p_factor: float | None = Query(None, ge=0.1, le=1.5),
     weather_auto: bool = Query(True),
     weather_mode: str = Query("auto"),
     weather_days_ago: int = Query(14, ge=0, le=60),
     weather_hours: int = Query(24 * 14, ge=24, le=24 * 90),
     weather_event_mm_h: float | None = Query(None, ge=1.0, le=300.0),
     weather_large_aoi_km2: float = Query(3.0, ge=0.1, le=5000.0),
+    event_start_iso: str | None = Query(None),
+    event_end_iso: str | None = Query(None),
+    ml_model_key: str | None = Query(None),
+    ml_severity_model_key: str | None = Query(None),
+    ml_threshold: float = Query(0.50, ge=0.05, le=0.95),
     st_parts: str | None = Query(None),
     public_confirm: bool = Query(False),
     dem_cache_dir: str | None = Query(None),
@@ -639,6 +743,12 @@ async def analyze_bbox_endpoint(
 ):
     """Fetch DEM from WCS (or public download fallback) and return streamed progress + GeoJSON."""
 
+    analysis_type = _normalize_analysis_type(analysis_type)
+    event_start_iso, event_end_iso = _validate_event_ml_window(
+        analysis_type=analysis_type,
+        event_start_iso=event_start_iso,
+        event_end_iso=event_end_iso,
+    )
     dem_source = (dem_source or "wcs").strip().lower()
     # Progress mapping:
     # - public/cog acquisition uses steps 1..4
@@ -844,8 +954,14 @@ async def analyze_bbox_endpoint(
                 threshold=threshold,
                 progress_callback=on_progress,
                 analysis_type=analysis_type,
+                abag_p_factor=abag_p_factor,
                 aoi_polygon=bbox.polygon,
                 weather_context=weather_ctx_for_analysis,
+                event_start_iso=event_start_iso,
+                event_end_iso=event_end_iso,
+                ml_model_key=ml_model_key,
+                ml_severity_model_key=ml_severity_model_key,
+                ml_threshold=ml_threshold,
             )
         finally:
             if tmp_path:
@@ -1132,22 +1248,30 @@ async def abflussatlas_weather_events(
         notes: list[str] = []
 
         if use_icon:
-            bundle = await run_in_threadpool(fetch_batch, pts, startISO, endISO, agg)
-            for item in bundle or []:
-                p = str(item.get("point") or "")
-                pkey = p if p in by_point else None
-                if not pkey:
-                    # normalize fallback for providers returning slightly different precision
-                    try:
-                        lat, lon = [float(x) for x in p.split(",")]
-                        pkey = _point_key(lat, lon)
-                    except Exception:
-                        pkey = None
-                if not pkey:
-                    continue
-                evs = _detect_starkregen_events_for_series(item.get("series") or [], source="icon2d")
-                by_point[pkey].extend(evs)
-            sources_used.append("icon2d")
+            try:
+                bundle = await run_in_threadpool(fetch_batch, pts, startISO, endISO, agg)
+                for item in bundle or []:
+                    p = str(item.get("point") or "")
+                    pkey = p if p in by_point else None
+                    if not pkey:
+                        # normalize fallback for providers returning slightly different precision
+                        try:
+                            lat, lon = [float(x) for x in p.split(",")]
+                            pkey = _point_key(lat, lon)
+                        except Exception:
+                            pkey = None
+                    if not pkey:
+                        continue
+                    if pkey not in by_point:
+                        # Defensive: ignore unexpected point keys from provider payload
+                        # instead of aborting the whole request with KeyError.
+                        notes.append(f"ICON2D point mismatch ignored: {pkey}")
+                        continue
+                    evs = _detect_starkregen_events_for_series(item.get("series") or [], source="icon2d")
+                    by_point[pkey].extend(evs)
+                sources_used.append("icon2d")
+            except Exception as exc:
+                notes.append(f"ICON2D nicht verfuegbar: {exc}")
 
         if use_dwd:
             start_dt = dt.datetime.fromisoformat(startISO.replace("Z", "+00:00")).astimezone(dt.timezone.utc).date()
@@ -1168,20 +1292,25 @@ async def abflussatlas_weather_events(
 
         radar_meta = {"available": False, "reason": None}
         if use_radar:
-            radar = await run_in_threadpool(fetch_radar_events, pts, startISO, endISO)
-            radar_meta["available"] = bool(radar.get("available"))
-            radar_meta["reason"] = radar.get("reason")
-            per = radar.get("per_point") or {}
-            if isinstance(per, dict):
-                for pkey, evs in per.items():
-                    if pkey not in by_point:
-                        continue
-                    if isinstance(evs, list):
-                        by_point[pkey].extend([e for e in evs if isinstance(e, dict)])
-            if radar_meta["available"]:
-                sources_used.append("radar")
-            else:
-                notes.append(str(radar_meta.get("reason") or "Radar nicht verfuegbar"))
+            try:
+                radar = await run_in_threadpool(fetch_radar_events, pts, startISO, endISO)
+                radar_meta["available"] = bool(radar.get("available"))
+                radar_meta["reason"] = radar.get("reason")
+                per = radar.get("per_point") or {}
+                if isinstance(per, dict):
+                    for pkey, evs in per.items():
+                        if pkey not in by_point:
+                            continue
+                        if isinstance(evs, list):
+                            by_point[pkey].extend([e for e in evs if isinstance(e, dict)])
+                if radar_meta["available"]:
+                    sources_used.append("radar")
+                else:
+                    notes.append(str(radar_meta.get("reason") or "Radar nicht verfuegbar"))
+            except Exception as exc:
+                radar_meta["available"] = False
+                radar_meta["reason"] = f"Radar-Fehler: {exc}"
+                notes.append(str(radar_meta["reason"]))
 
         per_point: list[dict] = []
         merged: list[dict] = []
@@ -1254,6 +1383,62 @@ async def abflussatlas_weather_preset(
         raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/ops/sa-chunks/summary")
+async def ops_sa_chunks_summary():
+    root = _repo_root()
+    exports_dir = root / "paper" / "exports" / "sa_chunks"
+    state_path = exports_dir / "sa_chunk_run_state.json"
+    merged_manifest_path = exports_dir / "field_event_results_merged.manifest.json"
+    merged_qa_path = exports_dir / "field_event_results_merged.qa.json"
+    merged_report_path = exports_dir / "field_event_results_merged.report.md"
+
+    chunk_csvs = sorted(exports_dir.glob("field_event_results_chunk_*.csv"))
+    done_flags = sorted(exports_dir.glob("chunk_*.done"))
+    latest_chunk = max(chunk_csvs, key=lambda p: p.stat().st_mtime) if chunk_csvs else None
+
+    state = _safe_read_json(state_path)
+    merged_manifest = _safe_read_json(merged_manifest_path)
+    merged_qa = _safe_read_json(merged_qa_path)
+
+    return {
+        "available": exports_dir.exists(),
+        "exports_dir": str(exports_dir),
+        "chunk_csv_count": len(chunk_csvs),
+        "done_flags_count": len(done_flags),
+        "latest_chunk_csv": str(latest_chunk) if latest_chunk else None,
+        "state_path": str(state_path),
+        "state": state,
+        "merged_manifest_path": str(merged_manifest_path),
+        "merged_manifest": merged_manifest,
+        "merged_qa_path": str(merged_qa_path),
+        "merged_qa": merged_qa,
+        "merged_report_path": str(merged_report_path),
+        "merged_report_exists": merged_report_path.exists(),
+    }
+
+
+@app.get("/ops/quickcheck/latest")
+async def ops_quickcheck_latest(limit: int = Query(10, ge=1, le=50)):
+    latest_manifest = _latest_file("paper/exports/quickcheck/quickcheck_*_manifest.json")
+    if not latest_manifest:
+        return {
+            "available": False,
+            "manifest_path": None,
+            "manifest": None,
+            "top_rows": [],
+        }
+    manifest = _safe_read_json(latest_manifest) or {}
+    outputs = (manifest.get("outputs") or {}) if isinstance(manifest, dict) else {}
+    top10_csv = Path(str(outputs.get("top10_csv") or ""))
+    top_rows = _read_top_rows(top10_csv, limit=limit) if top10_csv else []
+    return {
+        "available": True,
+        "manifest_path": str(latest_manifest),
+        "manifest": manifest,
+        "top_rows": top_rows,
+    }
 
 
 @app.get("/wms/layers")

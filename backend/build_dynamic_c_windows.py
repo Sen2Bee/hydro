@@ -79,6 +79,11 @@ def main() -> int:
         default="start_year",
         help="How to derive crop-year per window when crop history is used.",
     )
+    p.add_argument(
+        "--fallback-base-c-raster",
+        default=str(Path("data") / "layers" / "c_dynamic_sa" / "c_factor" / "C_Faktor_20230401_20231031.tif"),
+        help="Optional fallback base-C raster if Feldblock download fails.",
+    )
     args = p.parse_args()
 
     windows = _parse_windows(args.windows)
@@ -107,6 +112,7 @@ def main() -> int:
 
     fetch_script = str(Path("backend") / "fetch_sentinel_ndvi.py")
     c_script = str(Path("backend") / "build_c_factor_proxy.py")
+    c_fallback_script = str(Path("backend") / "build_c_from_base_ndvi.py")
 
     for i, (start, end) in enumerate(windows, start=1):
         tag = f"{start.replace('-', '')}_{end.replace('-', '')}"
@@ -171,7 +177,41 @@ def main() -> int:
             c_cmd.extend(["--crop-history-csv", str(args.crop_history_csv)])
             if crop_year is not None:
                 c_cmd.extend(["--crop-year", str(crop_year)])
-        _run_cmd(c_cmd)
+        try:
+            _run_cmd(c_cmd)
+        except Exception as ex:
+            fb = Path(args.fallback_base_c_raster)
+            if not fb.exists():
+                raise
+            print(
+                f"[WARN] C builder failed ({ex}); fallback with base-C raster: {fb}",
+                flush=True,
+            )
+            fb_cmd = [
+                sys.executable,
+                c_fallback_script,
+                "--template-raster",
+                str(args.template_raster),
+                "--base-c-raster",
+                str(fb),
+                "--ndvi-raster",
+                str(ndvi_out),
+                "--out-tif",
+                str(c_out),
+                "--season-label",
+                f"{start}..{end}",
+                "--c-config",
+                str(args.c_config),
+                "--west",
+                str(args.west),
+                "--south",
+                str(args.south),
+                "--east",
+                str(args.east),
+                "--north",
+                str(args.north),
+            ]
+            _run_cmd(fb_cmd)
 
         run_manifest["windows"].append(
             {

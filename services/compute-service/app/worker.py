@@ -22,6 +22,7 @@ S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL")
 S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID")
 S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY")
 S3_BUCKET = os.getenv("S3_BUCKET")
+ALLOWED_ANALYSIS_TYPES = {"starkregen", "erosion", "abag", "erosion_events_ml"}
 
 if LEGACY_BACKEND_PATH not in sys.path:
     sys.path.insert(0, LEGACY_BACKEND_PATH)
@@ -176,6 +177,27 @@ def resolve_dem_path(parameters: dict) -> tuple[str, str | None]:
 def run_pysheds_compute(job_id: UUID, model_id: UUID, parameters: dict) -> dict:
     threshold = int(parameters.get("threshold", 200))
     analysis_type = str(parameters.get("analysis_type") or "starkregen").strip().lower()
+    if analysis_type not in ALLOWED_ANALYSIS_TYPES:
+        raise RuntimeError(
+            f"invalid analysis_type '{analysis_type}' (allowed: {', '.join(sorted(ALLOWED_ANALYSIS_TYPES))})"
+        )
+    event_start_iso = parameters.get("event_start_iso")
+    event_end_iso = parameters.get("event_end_iso")
+    if analysis_type == "erosion_events_ml" and (not event_start_iso or not event_end_iso):
+        raise RuntimeError("analysis_type=erosion_events_ml requires parameters.event_start_iso and event_end_iso")
+    ml_model_key = parameters.get("ml_model_key")
+    ml_severity_model_key = parameters.get("ml_severity_model_key")
+    ml_threshold = float(parameters.get("ml_threshold", 0.50))
+    if not (0.05 <= ml_threshold <= 0.95):
+        raise RuntimeError("parameters.ml_threshold must be within [0.05, 0.95]")
+    abag_p_factor = parameters.get("abag_p_factor")
+    if abag_p_factor is not None:
+        try:
+            abag_p_factor = float(abag_p_factor)
+        except Exception:
+            raise RuntimeError("parameters.abag_p_factor must be numeric")
+        if not (0.1 <= float(abag_p_factor) <= 1.5):
+            raise RuntimeError("parameters.abag_p_factor must be within [0.1, 1.5]")
     weather_context: dict[str, Any] | None = None
     if analysis_type == "starkregen":
         # Jobs-mode parity with legacy /analyze-bbox:
@@ -205,6 +227,12 @@ def run_pysheds_compute(job_id: UUID, model_id: UUID, parameters: dict) -> dict:
             threshold=threshold,
             analysis_type=analysis_type,
             weather_context=weather_context,
+            event_start_iso=str(event_start_iso) if event_start_iso else None,
+            event_end_iso=str(event_end_iso) if event_end_iso else None,
+            ml_model_key=str(ml_model_key) if ml_model_key else None,
+            ml_severity_model_key=str(ml_severity_model_key) if ml_severity_model_key else None,
+            ml_threshold=ml_threshold,
+            abag_p_factor=float(abag_p_factor) if abag_p_factor is not None else None,
         )
     finally:
         if cleanup_dir and os.path.isdir(cleanup_dir):

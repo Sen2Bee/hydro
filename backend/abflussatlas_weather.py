@@ -3,7 +3,9 @@ from __future__ import annotations
 import datetime as dt
 import math
 import os
+import random
 import threading
+import time
 
 import requests
 
@@ -18,6 +20,13 @@ HIST_HOST = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 LIVE_HOST = "https://api.open-meteo.com/v1/forecast"
 MODEL = "icon_d2"
 MIXED_CUTOFF_DAYS = int(os.getenv("ICON2D_CUTOFF_DAYS", "16") or 16)
+ICON2D_MAX_RETRIES = int(os.getenv("ICON2D_MAX_RETRIES", "5") or 5)
+ICON2D_BACKOFF_BASE_S = float(os.getenv("ICON2D_BACKOFF_BASE_S", "1.0") or 1.0)
+ICON2D_BACKOFF_CAP_S = float(os.getenv("ICON2D_BACKOFF_CAP_S", "20.0") or 20.0)
+ICON2D_USER_AGENT = (os.getenv("ICON2D_USER_AGENT", "hydrowatch-berlin/1.0") or "hydrowatch-berlin/1.0").strip()
+
+_SESSION = requests.Session()
+_SESSION.headers.update({"User-Agent": ICON2D_USER_AGENT})
 
 
 def _now_s() -> float:
@@ -77,6 +86,43 @@ def _provider_mode() -> str:
     if mode not in ("auto", "icon2d", "dwd"):
         return "icon2d"
     return mode
+
+
+def _retry_delay_s(attempt: int, retry_after_header: str | None = None) -> float:
+    if retry_after_header:
+        try:
+            ra = float(retry_after_header)
+            if math.isfinite(ra) and ra > 0:
+                return min(float(ra), ICON2D_BACKOFF_CAP_S)
+        except Exception:
+            pass
+    base = max(0.1, float(ICON2D_BACKOFF_BASE_S))
+    cap = max(base, float(ICON2D_BACKOFF_CAP_S))
+    # exponential backoff with bounded jitter
+    delay = min(cap, base * (2 ** max(0, attempt - 1)))
+    jitter = random.uniform(0.0, max(0.05, delay * 0.25))
+    return min(cap, delay + jitter)
+
+
+def _get_json_with_retry(url: str, *, params: dict, timeout_s: int) -> object:
+    attempts = max(1, int(ICON2D_MAX_RETRIES))
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = _SESSION.get(url, params=params, timeout=timeout_s)
+            if resp.status_code == 429 or resp.status_code >= 500:
+                if attempt < attempts:
+                    time.sleep(_retry_delay_s(attempt, resp.headers.get("Retry-After")))
+                    continue
+                resp.raise_for_status()
+            resp.raise_for_status()
+            return resp.json()
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt >= attempts:
+                break
+            time.sleep(_retry_delay_s(attempt))
+    raise RuntimeError(str(last_exc) if last_exc else "ICON2D request fehlgeschlagen.")
 
 
 def _icon2d_base_url() -> str | None:
@@ -282,9 +328,7 @@ def _icon2d_fetch_batch_all_open_meteo(
         "timezone": "UTC",
     }
 
-    resp = requests.get(host, params=params, timeout=ICON2D_TIMEOUT_S)
-    resp.raise_for_status()
-    raw = resp.json()
+    raw = _get_json_with_retry(host, params=params, timeout_s=ICON2D_TIMEOUT_S)
     locations = raw if isinstance(raw, list) else [raw]
 
     out: list[dict] = []

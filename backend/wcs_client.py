@@ -233,7 +233,13 @@ def _clip_local_dem_utm32(
 
         data = src.read(1, window=w, boundless=False)
         profile = src.profile.copy()
+        # Source can be a VRT; force a concrete GTiff write profile for temp clip output.
+        profile.pop("blockxsize", None)
+        profile.pop("blockysize", None)
         profile.update(
+            driver="GTiff",
+            tiled=False,
+            count=1,
             height=int(w.height),
             width=int(w.width),
             transform=rasterio.windows.transform(w, src.transform),

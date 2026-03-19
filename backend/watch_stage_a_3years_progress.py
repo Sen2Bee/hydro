@@ -26,6 +26,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--interval-s", type=int, default=60, help="Polling interval seconds")
     p.add_argument("--stop-on-finish", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument(
+        "--stall-max-intervals",
+        type=int,
+        default=20,
+        help="Abort watcher when no overall progress for N intervals",
+    )
+    p.add_argument(
         "--on-finish-cmd",
         default="",
         help="Optional command to start once when all Stage-A chunks are complete",
@@ -73,10 +79,16 @@ def main() -> int:
         out.write(f"[{ts_local()}] START overall watcher manifest={manifest_path}\n")
         out.flush()
 
+        prev_total_done: int | None = None
+        prev_ts: dt.datetime | None = None
+        prev_done_by_year: dict[str, int] = {}
+        max_done_by_year: dict[str, int] = {}
+        no_progress_intervals = 0
+
         while True:
             total_done = 0
             total_all = 0
-            total_failed = 0
+            total_open_issues = 0
             per_year = []
 
             for w in workers:
@@ -85,27 +97,72 @@ def main() -> int:
                 state_path = exports_dir / "precompute_state.json"
                 st = load_json(state_path) if state_path.exists() else {}
 
-                done = len(st.get("completed", []) or [])
-                failed = len(st.get("failed", []) or [])
+                completed_entries = st.get("completed", []) or []
+                completed_ids = {
+                    int(x.get("chunk_idx"))
+                    for x in completed_entries
+                    if isinstance(x, dict) and x.get("chunk_idx") is not None
+                }
+                raw_done = len(completed_ids) if completed_ids else len(completed_entries)
+                # Keep displayed counters monotonic across worker restarts/state rewrites.
+                prev_max = int(max_done_by_year.get(year_key, 0))
+                done = raw_done if raw_done >= prev_max else prev_max
+                max_done_by_year[year_key] = done
+                failed_entries = st.get("failed", []) or []
+                failed_ids = {
+                    int(x.get("chunk_idx"))
+                    for x in failed_entries
+                    if isinstance(x, dict) and x.get("chunk_idx") is not None
+                }
+                open_issues = len(failed_ids - completed_ids) if failed_ids else 0
                 all_chunks = int(st.get("total_chunks", 0) or 0)
                 pct = (100.0 * done / all_chunks) if all_chunks > 0 else 0.0
 
                 total_done += done
                 total_all += all_chunks
-                total_failed += failed
-                per_year.append((year_key, done, all_chunks, failed, pct))
+                total_open_issues += open_issues
+                prev_done = int(prev_done_by_year.get(year_key, done))
+                delta_done = int(done - prev_done)
+                per_year.append((year_key, done, all_chunks, pct, delta_done))
 
             overall_pct = (100.0 * total_done / total_all) if total_all > 0 else 0.0
+            now_ts = dt.datetime.now()
+            if prev_total_done is None or prev_ts is None:
+                delta_total_done = 0
+                mins = max(1.0 / 60.0, float(args.interval_s) / 60.0)
+            else:
+                delta_total_done = int(total_done - prev_total_done)
+                mins = max(1.0 / 60.0, (now_ts - prev_ts).total_seconds() / 60.0)
+            rate_per_min = float(delta_total_done) / mins
+            status = "OK" if delta_total_done > 0 else ("WARN" if total_open_issues > 0 else "IDLE")
             line = (
                 f"[{ts_local()}] Gesamt: {total_done}/{total_all} Chunks "
-                f"({overall_pct:5.2f}%), failed={total_failed}"
+                f"({overall_pct:5.2f}%), +{delta_total_done} ({rate_per_min:.2f}/min), "
+                f"open_issues={total_open_issues}, status={status}"
             )
             out.write(line + "\n")
-            for year_key, done, all_chunks, failed, pct in per_year:
-                out.write(f"  - {year_key}: {done}/{all_chunks} ({pct:5.2f}%), failed={failed}\n")
             out.flush()
 
+            prev_total_done = int(total_done)
+            prev_ts = now_ts
+            for year_key, done, *_rest in per_year:
+                prev_done_by_year[year_key] = int(done)
+
             all_finished = total_all > 0 and total_done >= total_all
+            if delta_total_done > 0:
+                no_progress_intervals = 0
+            else:
+                no_progress_intervals += 1
+
+            stall_limit = max(1, int(args.stall_max_intervals))
+            if (not all_finished) and (no_progress_intervals >= stall_limit):
+                out.write(
+                    f"[{ts_local()}] STALLED no progress for {no_progress_intervals} intervals "
+                    f"(limit={stall_limit}), open_issues={total_open_issues}. Stop watcher.\n"
+                )
+                out.flush()
+                return 2
+
             if bool(args.stop_on_finish) and all_finished:
                 if args.on_finish_cmd.strip():
                     already_started = bool(trigger_state.get("started", False))

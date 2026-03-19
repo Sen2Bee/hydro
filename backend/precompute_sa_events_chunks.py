@@ -39,6 +39,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--min-severity", type=int, default=0)
     p.add_argument("--weather-cell-km", type=float, default=2.0)
     p.add_argument("--request-retries", type=int, default=2)
+    p.add_argument("--request-timeout-s", type=float, default=120.0)
     p.add_argument("--retry-backoff-initial-s", type=float, default=5.0)
     p.add_argument("--retry-backoff-max-s", type=float, default=20.0)
     p.add_argument("--min-interval-s", type=float, default=4.0)
@@ -247,6 +248,8 @@ def main() -> int:
                 str(float(args.weather_cell_km)),
                 "--request-retries",
                 str(int(args.request_retries)),
+                "--request-timeout-s",
+                str(float(args.request_timeout_s)),
                 "--retry-backoff-initial-s",
                 str(float(args.retry_backoff_initial_s)),
                 "--retry-backoff-max-s",

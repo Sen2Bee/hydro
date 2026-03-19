@@ -238,7 +238,13 @@ def fetch_dem_from_st_public_download(
 
         data = src.read(1, window=w, boundless=False)
         profile = src.profile.copy()
+        # Source is a VRT mosaic; write to a concrete GTiff temp file.
+        profile.pop("blockxsize", None)
+        profile.pop("blockysize", None)
         profile.update(
+            driver="GTiff",
+            tiled=False,
+            count=1,
             height=int(w.height),
             width=int(w.width),
             transform=rasterio.windows.transform(w, src.transform),

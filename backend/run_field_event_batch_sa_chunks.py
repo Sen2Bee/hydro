@@ -54,6 +54,12 @@ def _parse_args() -> argparse.Namespace:
         help="Temporary GeoJSON chunks.",
     )
     p.add_argument(
+        "--use-existing-chunks",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use precomputed chunk GeoJSONs from --chunks-dir instead of rowid-based chunk export.",
+    )
+    p.add_argument(
         "--exports-dir",
         default=str(Path("paper") / "exports" / "sa_chunks"),
         help="Chunk CSV outputs.",
@@ -141,6 +147,11 @@ def _fetch_chunk_features(conn: sqlite3.Connection, rowid_start: int, rowid_end:
         except Exception:
             continue
     return out
+
+
+def _load_geojson_features(path: Path) -> list[dict[str, Any]]:
+    obj = json.loads(path.read_text(encoding="utf-8"))
+    return list(obj.get("features", []))
 
 
 def _largest_ring_lonlat(feature: dict[str, Any]) -> list[list[float]] | None:
@@ -431,7 +442,13 @@ def main() -> int:
             if total_rows <= 0:
                 raise SystemExit("No rows in flurstuecke table.")
             chunk_size = max(1, int(args.chunk_size))
-            total_chunks = int(math.ceil(total_rows / float(chunk_size)))
+            if bool(args.use_existing_chunks):
+                chunk_files = sorted(chunks_dir.glob("schlaege_chunk_*.geojson"))
+                if not chunk_files:
+                    raise SystemExit(f"No precomputed chunks found in {chunks_dir}")
+                total_chunks = len(chunk_files)
+            else:
+                total_chunks = int(math.ceil(total_rows / float(chunk_size)))
 
             start_chunk = max(1, int(args.start_chunk))
             end_chunk = total_chunks if int(args.max_chunks) <= 0 else min(total_chunks, start_chunk + int(args.max_chunks) - 1)
@@ -447,6 +464,7 @@ def main() -> int:
                 "total_chunks": total_chunks,
                 "run_start_chunk": start_chunk,
                 "run_end_chunk": end_chunk,
+                "use_existing_chunks": bool(args.use_existing_chunks),
             }
             _write_state(manifest, run_meta)
 
@@ -461,6 +479,7 @@ def main() -> int:
                 "total_chunks": total_chunks,
                 "run_start_chunk": start_chunk,
                 "run_end_chunk": end_chunk,
+                "use_existing_chunks": bool(args.use_existing_chunks),
                 "completed": [],
                 "failed": [],
             }
@@ -470,7 +489,6 @@ def main() -> int:
                 run_chunks_total = max(1, end_chunk - start_chunk + 1)
                 run_chunks_done = idx - start_chunk + 1
                 run_pct = (float(run_chunks_done) / float(run_chunks_total)) * 100.0
-                rowid_start, rowid_end = _chunk_bounds(min_rowid, max_rowid, chunk_size, idx)
                 chunk_geojson = chunks_dir / f"schlaege_chunk_{idx:05d}.geojson"
                 out_csv = exports_dir / f"field_event_results_chunk_{idx:05d}.csv"
                 done_flag = exports_dir / f"chunk_{idx:05d}.done"
@@ -484,12 +502,23 @@ def main() -> int:
                     _write_state(state_file, state)
                     continue
 
-                print(
-                    f"[SA-CHUNKS] chunk {idx}/{total_chunks} "
-                    f"(run {run_chunks_done}/{run_chunks_total}, {run_pct:5.1f}%): "
-                    f"rowid {rowid_start}..{rowid_end}"
-                )
-                features = _fetch_chunk_features(conn, rowid_start, rowid_end)
+                if bool(args.use_existing_chunks):
+                    print(
+                        f"[SA-CHUNKS] chunk {idx}/{total_chunks} "
+                        f"(run {run_chunks_done}/{run_chunks_total}, {run_pct:5.1f}%): "
+                        f"precomputed {chunk_geojson.name}"
+                    )
+                    if not chunk_geojson.exists():
+                        raise RuntimeError(f"missing precomputed chunk: {chunk_geojson}")
+                    features = _load_geojson_features(chunk_geojson)
+                else:
+                    rowid_start, rowid_end = _chunk_bounds(min_rowid, max_rowid, chunk_size, idx)
+                    print(
+                        f"[SA-CHUNKS] chunk {idx}/{total_chunks} "
+                        f"(run {run_chunks_done}/{run_chunks_total}, {run_pct:5.1f}%): "
+                        f"rowid {rowid_start}..{rowid_end}"
+                    )
+                    features = _fetch_chunk_features(conn, rowid_start, rowid_end)
                 if not features:
                     print(f"[SA-CHUNKS] chunk {idx}: no features, mark done.")
                     done_flag.write_text("empty\n", encoding="utf-8")
@@ -517,7 +546,8 @@ def main() -> int:
                     _write_state(state_file, state)
                     continue
 
-                _write_geojson(chunk_geojson, features)
+                if not bool(args.use_existing_chunks):
+                    _write_geojson(chunk_geojson, features)
                 try:
                     _run_batch(args, chunk_geojson, out_csv)
                     qa_code = 0

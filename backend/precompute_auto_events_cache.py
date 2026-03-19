@@ -56,6 +56,37 @@ def _is_throttle(note: str) -> bool:
     return False
 
 
+def _looks_backend_down(note: str) -> bool:
+    t = (note or "").lower()
+    if not t:
+        return False
+    markers = (
+        "failed to establish a new connection",
+        "connection refused",
+        "max retries exceeded",
+        "winerror 10061",
+        "target machine actively refused",
+        "newconnectionerror",
+        "connection aborted",
+    )
+    return any(m in t for m in markers)
+
+
+def _backend_health_ok(api_base_url: str, health_path: str, timeout_s: float, retries: int) -> bool:
+    base = str(api_base_url or "").rstrip("/")
+    hp = str(health_path or "/openapi.json")
+    url = f"{base}{hp if hp.startswith('/') else '/' + hp}"
+    tries = max(1, int(retries))
+    for _ in range(tries):
+        try:
+            r = requests.get(url, timeout=max(0.5, float(timeout_s)))
+            if int(r.status_code) == 200:
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def _parse_iso_utc(value: str) -> dt.datetime | None:
     v = str(value or "").strip()
     if not v:
@@ -211,6 +242,7 @@ def main() -> int:
     p.add_argument("--top-n", type=int, default=3)
     p.add_argument("--min-severity", type=int, default=1)
     p.add_argument("--request-retries", type=int, default=6)
+    p.add_argument("--request-timeout-s", type=float, default=120.0)
     p.add_argument("--retry-backoff-initial-s", type=float, default=5.0)
     p.add_argument("--retry-backoff-max-s", type=float, default=90.0)
     p.add_argument("--min-interval-s", type=float, default=1.5)
@@ -220,6 +252,10 @@ def main() -> int:
     p.add_argument("--weather-cell-km", type=float, default=2.0)
     p.add_argument("--neighbor-max-km", type=float, default=2.0)
     p.add_argument("--cell-cache-dir", default="")
+    p.add_argument("--backend-down-consecutive-stop", type=int, default=12)
+    p.add_argument("--backend-health-path", default="/openapi.json")
+    p.add_argument("--backend-health-timeout-s", type=float, default=2.0)
+    p.add_argument("--backend-health-retries", type=int, default=1)
     p.add_argument("--out-csv", required=True)
     p.add_argument("--log-file", default="")
     args = p.parse_args()
@@ -255,6 +291,7 @@ def main() -> int:
     empty = 0
     last_call_ts = 0.0
     cell_fetch_cache: dict[str, dict[str, Any]] = {}
+    backend_down_streak = 0
 
     def log(msg: str) -> None:
         line = f"[{_ts()}] {msg}"
@@ -303,7 +340,7 @@ def main() -> int:
                     last_call_ts = time.monotonic()
 
                     try:
-                        resp = requests.get(url, params=p, timeout=120)
+                        resp = requests.get(url, params=p, timeout=max(1.0, float(args.request_timeout_s)))
                         http_status = int(resp.status_code)
                         if http_status == 429:
                             raise RuntimeError("HTTP 429")
@@ -433,6 +470,11 @@ def main() -> int:
 
         cache_path = _events_cache_path(cache_dir, fld.field_id, cache_key)
         if payload is None:
+            down_like = _looks_backend_down(fetch_error or last_error)
+            if down_like:
+                backend_down_streak += 1
+            else:
+                backend_down_streak = 0
             err += 1
             rows.append(
                 {
@@ -447,7 +489,22 @@ def main() -> int:
                     "cache_path": str(cache_path),
                 }
             )
+            if backend_down_streak >= max(1, int(args.backend_down_consecutive_stop)):
+                healthy = _backend_health_ok(
+                    api_base_url=str(args.api_base_url),
+                    health_path=str(args.backend_health_path),
+                    timeout_s=float(args.backend_health_timeout_s),
+                    retries=int(args.backend_health_retries),
+                )
+                if not healthy:
+                    _write_csv(out_csv, rows)
+                    log(
+                        "abort backend unreachable: "
+                        f"consecutive_failures={backend_down_streak} api_base={args.api_base_url}"
+                    )
+                    return 86
         else:
+            backend_down_streak = 0
             evs = _parse_auto_events_payload(
                 payload,
                 top_n=int(args.top_n),

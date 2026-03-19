@@ -14,6 +14,12 @@ const UI_STATE_KEY = 'hydrowatch:ui_state_v1'
 // Default start view: Halle (Saale).
 const DEFAULT_MAP_VIEW = { lat: 51.482, lon: 11.969, zoom: 12 }
 
+function normalizeHashRoute(v) {
+    const raw = String(v || '#/')
+    const noQuery = raw.split('?')[0]
+    return noQuery || '#/'
+}
+
 function isDevUiEnabled() {
     // Hidden developer UI toggle:
     // - visit with ?dev=1 once (persists), or
@@ -138,6 +144,7 @@ const BASEMAPS = {
     },
 }
 
+
 const RISK_COLORS = {
     niedrig: '#2ecc71',
     mittel: '#f1c40f',
@@ -157,6 +164,15 @@ const CORRIDOR_DENSITY_PRESETS = [
     { key: 'medium', label: 'Mittel', min_frac_of_max: 0.05 },
     { key: 'fine', label: 'Fein', min_frac_of_max: 0.0 }, // no extra filtering
 ]
+const DEFAULT_CORRIDOR_DENSITY_INDEX = 1 // Mittel
+
+const ABAG_P_PRESETS = [
+    { key: 'none', label: 'Keine Massnahme (P=1.00)', p: 1.00 },
+    { key: 'cross_slope', label: 'Querbewirtschaftung (P=0.80)', p: 0.80 },
+    { key: 'strip_cropping', label: 'Streifenanbau (P=0.65)', p: 0.65 },
+    { key: 'strong_support', label: 'Starker Schutz (P=0.50)', p: 0.50 },
+]
+const DEFAULT_ABAG_P_KEY = 'none'
 
 function km2ToHa(km2) {
     const v = Number(km2)
@@ -191,6 +207,18 @@ function formatAreaCompact(m2, nf) {
         return `${nf.format(ha)} ha`
     }
     return `${nf.format(Math.round(v))} m²`
+}
+
+function formatUtcShort(value) {
+    const raw = String(value || '').trim()
+    if (!raw) return '-'
+    try {
+        const d = new Date(raw)
+        if (Number.isNaN(d.getTime())) return raw
+        return d.toLocaleString('de-DE', { hour12: false })
+    } catch {
+        return raw
+    }
 }
 
 function officialLayerName(providerKey, type, scenarioKey) {
@@ -266,6 +294,17 @@ function pickCriticalErosionSegments(geojson, maxN = 250) {
         features: (critical.length ? critical : fallback),
         analysis: fc.analysis,
     }
+}
+
+function normalizeAnalysisType(value) {
+    const v = String(value || '').toLowerCase()
+    if (v === 'erosion' || v === 'abag' || v === 'starkregen') return v
+    return 'starkregen'
+}
+
+function isErosionLikeAnalysis(value) {
+    const v = normalizeAnalysisType(value)
+    return v === 'erosion' || v === 'abag'
 }
 
 function bboxFromPoints(points) {
@@ -1300,16 +1339,21 @@ function HelpPage() {
                     <h1>Hydrowatch: Hilfe & Wissenschaftliche Methodik</h1>
                     <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                         <a className="help-back-btn" href="#/daten">Daten & Quellen</a>
-                        <a className="help-back-btn" href="#/">Zurueck zur Karte</a>
+                        <a className="help-back-btn" href="#/">Zurück zur Karte</a>
                     </div>
                 </div>
 
                 <section className="help-page-section">
                     <h2>Ziel und Nutzen</h2>
                     <p>
-                        Hydrowatch liefert eine indikative Risikoanalyse fuer Starkregenabfluss und Erosionsneigung.
-                        Die Ergebnisse unterstuetzen Priorisierung von Flaechen, Hotspots und Massnahmen.
+                        Hydrowatch liefert eine indikative Risikoanalyse für Starkregenabfluss und Erosionsneigung.
+                        Die Ergebnisse unterstützen Priorisierung von Flächen, Hotspots und Maßnahmen.
                     </p>
+                    <ul className="help-list">
+                        <li><strong>Kommune/Bauhof:</strong> kritische Abflusswege und Sammelpunkte schnell erkennen, Einsätze/Maßnahmen priorisieren.</li>
+                        <li><strong>Landwirtschaft:</strong> erosionskritische Bereiche und Sedimentpfade je Schlag/Hang sichtbar machen, Schutzmaßnahmen gezielt setzen.</li>
+                        <li><strong>Planer:</strong> belastbare Screening-Grundlage für Variantenvergleich, Vor-Ort-Termine und abgestimmte Kommunikation.</li>
+                    </ul>
                 </section>
 
                 <section className="help-page-section">
@@ -1477,7 +1521,7 @@ function ZoomControls({ geojson, area, sidebarOpen, onPlaceSelect }) {
                             title="Schliessen"
                             type="button"
                         >
-                            x
+                            ×
                         </button>
                     </div>
                     <PlaceSearchBox
@@ -1565,8 +1609,13 @@ function zoomMinFracForNet(zoom) {
     return 0.0 // Fein
 }
 
-function MapLayerPanel({ layers, onToggle, basemapKey, onBasemapChange, corridorDensity, onCorridorDensityChange, hasCorridors, minCorridorKm2, maxCorridorKm2, corridorTotalCount, corridorVisibleCount, hasPointCheck, catchmentLoading, catchmentMeta, catchmentError }) {
+function MapLayerPanel({ layers, onToggle, basemapKey, onBasemapChange, corridorDensity, onCorridorDensityChange, hasCorridors, minCorridorKm2, maxCorridorKm2, corridorTotalCount, corridorVisibleCount, hasPointCheck, catchmentLoading, catchmentMeta, catchmentError, layerAvailability = {} }) {
     const [open, setOpen] = useState(false)
+    const [sectionOpen, setSectionOpen] = useState({
+        analysis: true,
+        official: false,
+        basemap: false,
+    })
     const panelRef = useRef(null)
     const dropdownRef = useRef(null)
     const density = CORRIDOR_DENSITY_PRESETS[Math.max(0, Math.min(CORRIDOR_DENSITY_PRESETS.length - 1, Number(corridorDensity) || 0))]
@@ -1644,8 +1693,15 @@ function MapLayerPanel({ layers, onToggle, basemapKey, onBasemapChange, corridor
                     onWheel={(e) => e.stopPropagation()}
                     onTouchStart={(e) => e.stopPropagation()}
                 >
-                    <div className="map-layer-section">Ebenen</div>
-                    {layers.map((l) => {
+                    <button className="map-layer-accordion-head" type="button" onClick={() => setSectionOpen((s) => ({ ...s, analysis: !s.analysis }))}>
+                        <span>Analyse</span>
+                        <span className={`map-layer-accordion-chevron${sectionOpen.analysis ? ' open' : ''}`} aria-hidden="true">
+                            <svg viewBox="0 0 20 20" focusable="false">
+                                <path d="M5 7l5 6l5-6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                        </span>
+                    </button>
+                    {sectionOpen.analysis && layers.filter((l) => l.id === 'flow' || l.id === 'corridors' || l.id === 'catchment' || l.id === 'hotspots' || l.id === 'pointcheck').map((l) => {
                         if (l.id !== 'corridors') {
                             if (l.id === 'catchment') {
                                 const disabled = !hasPointCheck
@@ -1741,8 +1797,32 @@ function MapLayerPanel({ layers, onToggle, basemapKey, onBasemapChange, corridor
                             </div>
                         )
                     })}
-                    <div className="map-layer-section">Basiskarte</div>
-                    {Object.entries(BASEMAPS).map(([key, bm]) => (
+                    <button className="map-layer-accordion-head" type="button" onClick={() => setSectionOpen((s) => ({ ...s, official: !s.official }))}>
+                        <span>Amtlich (Referenz)</span>
+                        <span className={`map-layer-accordion-chevron${sectionOpen.official ? ' open' : ''}`} aria-hidden="true">
+                            <svg viewBox="0 0 20 20" focusable="false">
+                                <path d="M5 7l5 6l5-6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                        </span>
+                    </button>
+                    {sectionOpen.official && layers.filter((l) => l.id.startsWith('official_')).map((l) => {
+                        const available = layerAvailability[l.id] !== false
+                        return (
+                        <label className={`map-layer-item${available ? '' : ' is-disabled'}`} key={l.id} title={available ? '' : 'In dieser Region/Szene nicht verfügbar.'}>
+                            <input type="checkbox" checked={l.visible} disabled={!available} onChange={() => { if (available) onToggle(l.id) }} />
+                            <span className="layer-swatch" style={{ background: l.color }} />
+                            {l.name}
+                        </label>
+                    )})}
+                    <button className="map-layer-accordion-head" type="button" onClick={() => setSectionOpen((s) => ({ ...s, basemap: !s.basemap }))}>
+                        <span>Basiskarte</span>
+                        <span className={`map-layer-accordion-chevron${sectionOpen.basemap ? ' open' : ''}`} aria-hidden="true">
+                            <svg viewBox="0 0 20 20" focusable="false">
+                                <path d="M5 7l5 6l5-6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                        </span>
+                    </button>
+                    {sectionOpen.basemap && Object.entries(BASEMAPS).map(([key, bm]) => (
                         <label className="map-layer-item" key={key}>
                             <input type="radio" name="basemap" checked={basemapKey === key} onChange={() => onBasemapChange(key)} />
                             {bm.label}
@@ -2022,7 +2102,7 @@ function PlaceSearchBox({ bbox, onSelect, autoFocus = false, variant = 'sidebar'
                         aria-label="Clear"
                         type="button"
                     >
-                        x
+                        ×
                     </button>
                 )}
             </div>
@@ -2055,7 +2135,7 @@ function DataSourcesPage() {
             <div className="help-page-inner">
                 <div className="help-page-head">
                     <h1>RisikoKarte: Daten & Quellen</h1>
-                    <a className="help-back-btn" href="#/">Zurueck zur Karte</a>
+                    <a className="help-back-btn" href="#/">Zurück zur Karte</a>
                 </div>
 
                 <section className="help-page-section">
@@ -2064,16 +2144,16 @@ function DataSourcesPage() {
                         DGM1 (1 m): LVermGeo Sachsen-Anhalt (Geodatenportal), Open Data. Verarbeitung: COG-Kacheln.
                     </p>
                     <p>
-                        Ergebnisse sind eine Ersteinschaetzung (Screening) und ersetzen kein Gutachten.
+                        Ergebnisse sind eine Ersteinschätzung (Screening) und ersetzen kein Gutachten.
                     </p>
                 </section>
 
                 <section className="help-page-section">
                     <h2>DGM1 Sachsen-Anhalt</h2>
                     <p>
-                        Digitales Gelaendemodell DGM1 (1 m), Sachsen-Anhalt Ã¢â‚¬â€œ Quelle: Landesamt fuer Vermessung und Geoinformation Sachsen-Anhalt (LVermGeo),
-                        bereitgestellt ueber das Geodatenportal Sachsen-Anhalt (Open Data). Nutzung in der App: lokaler COG-Katalog (`D:\data\st_dgm1_cog`).
-                        Verarbeitung: Umwandlung in Cloud Optimized GeoTIFF (COG), Kachelung/Indexierung fuer performante Abfragen.
+                        Digitales Geländemodell DGM1 (1 m), Sachsen-Anhalt – Quelle: Landesamt für Vermessung und Geoinformation Sachsen-Anhalt (LVermGeo),
+                        bereitgestellt über das Geodatenportal Sachsen-Anhalt (Open Data). Nutzung in der App: lokaler COG-Katalog (`D:\data\st_dgm1_cog`).
+                        Verarbeitung: Umwandlung in Cloud Optimized GeoTIFF (COG), Kachelung/Indexierung für performante Abfragen.
                     </p>
                 </section>
 
@@ -2081,8 +2161,8 @@ function DataSourcesPage() {
                     <h2>Optionale Referenzlayer (falls eingeblendet)</h2>
                     <ul>
                         <li>Starkregen-Hinweiskarte: BKG (WMS), nur Referenzdarstellung.</li>
-                        <li>Hochwasser/UEG: zustaendige Landesbehoerden (WMS), amtliche Referenz.</li>
-                        <li>Bodendaten: BGR BUEK250 (Sachsen-Anhalt-Ausschnitt).</li>
+                        <li>Hochwasser/ÜSG: zuständige Landesbehörden (WMS), amtliche Referenz.</li>
+                        <li>Bodendaten: BGR BÜK250 (Sachsen-Anhalt-Ausschnitt).</li>
                         <li>Landbedeckung: ESA WorldCover 10 m.</li>
                         <li>Versiegelung: Copernicus HRL Imperviousness 10 m.</li>
                     </ul>
@@ -2091,9 +2171,9 @@ function DataSourcesPage() {
                 <section className="help-page-section">
                     <h2>Disclaimer (Langfassung)</h2>
                     <p>
-                        Die App liefert modellbasierte Ersteinschaetzungen auf Basis oeffentlich verfuegbarer Geodaten und vereinfachter Annahmen.
-                        Lokale Gegebenheiten (Kanalnetz, Bauwerke, Bodenfeuchte, Bewirtschaftung, aktuelle Verstopfungen etc.) koennen die Realitaet stark beeinflussen.
-                        Fuer Planungen und rechtssichere Bewertungen sind fachliche Detailuntersuchungen erforderlich.
+                        Die App liefert modellbasierte Ersteinschätzungen auf Basis öffentlich verfügbarer Geodaten und vereinfachter Annahmen.
+                        Lokale Gegebenheiten (Kanalnetz, Bauwerke, Bodenfeuchte, Bewirtschaftung, aktuelle Verstopfungen etc.) können die Realität stark beeinflussen.
+                        Für Planungen und rechtssichere Bewertungen sind fachliche Detailuntersuchungen erforderlich.
                     </p>
                 </section>
             </div>
@@ -2459,6 +2539,8 @@ function WeatherPanel({ bbox, analysisType = 'starkregen', selectedEvent = null,
                                     */}
                                     {(() => {
                                         const showInlineBarText = timelineEvents.length <= 5
+                                        const inlineLabelSizePx = timelineEvents.length <= 2 ? 10.5 : timelineEvents.length <= 3 ? 9.5 : 8.5
+                                        const inlineLabelLinePx = timelineEvents.length <= 2 ? 11.5 : timelineEvents.length <= 3 ? 10.5 : 9.5
                                         return (
                                     <div
                                         style={{
@@ -2515,7 +2597,11 @@ function WeatherPanel({ bbox, analysisType = 'starkregen', selectedEvent = null,
                                                         }}
                                                     >
                                                         {showInlineBarText && (
-                                                            <span className="weather-event-bar-inline" aria-hidden="true">
+                                                            <span
+                                                                className="weather-event-bar-inline"
+                                                                aria-hidden="true"
+                                                                style={{ fontSize: `${inlineLabelSizePx}px`, lineHeight: `${inlineLabelLinePx}px` }}
+                                                            >
                                                                 <span>{dShort}</span>
                                                                 <span>{t || '--:--'}</span>
                                                             </span>
@@ -2568,7 +2654,7 @@ function App() {
         } catch {}
     }, [])
 
-    const [hash, setHash] = useState(() => window.location.hash || '#/')
+    const [hash, setHash] = useState(() => normalizeHashRoute(window.location.hash))
     const [geoJsonData, setGeoJsonData] = useState(null)
     const [loading, setLoading] = useState(false)
     const [status, setStatus] = useState(null)
@@ -2586,7 +2672,7 @@ function App() {
     const [drawMode, setDrawMode] = useState(() => (initialUi?.drawMode === 'rectangle' ? 'rectangle' : 'polygon')) // polygon | rectangle
     const [corridorDensity, setCorridorDensity] = useState(() => {
         const v = Number(initialUi?.corridorDensity)
-        if (!Number.isFinite(v)) return 1 // default: Mittel
+        if (!Number.isFinite(v)) return DEFAULT_CORRIDOR_DENSITY_INDEX
         return Math.max(0, Math.min(CORRIDOR_DENSITY_PRESETS.length - 1, Math.round(v)))
     })
     const [drawnArea, setDrawnArea] = useState(() => {
@@ -2612,7 +2698,15 @@ function App() {
     const [selectedHotspot, setSelectedHotspot] = useState(null)
     const [highlightFeatureIds, setHighlightFeatureIds] = useState([])
     const [aoiProvider, setAoiProvider] = useState('nrw')
-    const [analysisType, setAnalysisType] = useState(() => (initialUi?.analysisType === 'erosion' ? 'erosion' : 'starkregen')) // starkregen | erosion
+    const [analysisType, setAnalysisType] = useState(() => normalizeAnalysisType(initialUi?.analysisType)) // starkregen | erosion | abag
+    const [abagPKey, setAbagPKey] = useState(() => {
+        const v = String(initialUi?.abagPKey || DEFAULT_ABAG_P_KEY)
+        return ABAG_P_PRESETS.some((x) => x.key === v) ? v : DEFAULT_ABAG_P_KEY
+    })
+    const abagPFactor = useMemo(() => {
+        const hit = ABAG_P_PRESETS.find((x) => x.key === abagPKey) || ABAG_P_PRESETS[0]
+        return Number(hit?.p || 1.0)
+    }, [abagPKey])
     const [demSource, setDemSource] = useState('wcs') // 'wcs' | 'cog' | 'public' (dev only)
     const [stPublicParts, setStPublicParts] = useState([1])
     const [stPublicConfirm, setStPublicConfirm] = useState(false)
@@ -2629,6 +2723,10 @@ function App() {
     const [selectedRainEvent, setSelectedRainEvent] = useState(null)
     const [weatherUiState, setWeatherUiState] = useState({ ready: false, loading: false, error: null })
     const [wcsHealth, setWcsHealth] = useState({ status: 'unknown', last: null, loading: false, error: null, show: false })
+    const [opsSummary, setOpsSummary] = useState(null)
+    const [opsQuickcheck, setOpsQuickcheck] = useState(null)
+    const [opsLoading, setOpsLoading] = useState(false)
+    const [opsError, setOpsError] = useState(null)
     const [fitKey, setFitKey] = useState(0)
     const [layers, setLayers] = useState(() => {
         const vis = (initialUi?.layerVis && typeof initialUi.layerVis === 'object') ? initialUi.layerVis : {}
@@ -2637,9 +2735,11 @@ function App() {
             { id: 'tiles', name: 'Basiskarte', visible: v('tiles', true), color: '#888' },
             { id: 'flow', name: 'Risikoklassen', visible: v('flow', true), color: '#00e5ff' },
             { id: 'corridors', name: 'Abflusskorridore', visible: v('corridors', false), color: '#00bcd4' },
+            { id: 'hotspots', name: 'Hotspots', visible: v('hotspots', true), color: '#ffffff' },
+            { id: 'pointcheck', name: 'Objekt-Check (Punktmarker)', visible: v('pointcheck', true), color: '#ff4d4f' },
             { id: 'catchment', name: 'Einzugsgebiet', visible: v('catchment', false), color: '#e5e7eb' },
-            { id: 'official_extent', name: 'Amtlich: Ueberflutungsgrenze', visible: v('official_extent', false), color: '#76ff03' },
-            { id: 'official_depth', name: 'Amtlich: Ueberflutungstiefe', visible: v('official_depth', false), color: '#00bcd4' },
+            { id: 'official_extent', name: 'Amtlich: Überschwemmungsgebiete (ÜSG)', visible: v('official_extent', false), color: '#76ff03' },
+            { id: 'official_depth', name: 'Amtlich: Wassertiefen', visible: v('official_depth', false), color: '#00bcd4' },
         ]
     })
     const bboxAreaKm2 = useMemo(() => estimateBboxAreaKm2(drawnArea), [drawnArea])
@@ -2671,6 +2771,7 @@ function App() {
     useEffect(() => scheduleUiSave({ basemap }), [basemap, scheduleUiSave])
     useEffect(() => scheduleUiSave({ sidebarOpen }), [sidebarOpen, scheduleUiSave])
     useEffect(() => scheduleUiSave({ analysisType }), [analysisType, scheduleUiSave])
+    useEffect(() => scheduleUiSave({ abagPKey }), [abagPKey, scheduleUiSave])
     useEffect(() => scheduleUiSave({ drawMode }), [drawMode, scheduleUiSave])
     useEffect(() => scheduleUiSave({ corridorDensity }), [corridorDensity, scheduleUiSave])
     useEffect(() => scheduleUiSave({ aoi: drawnArea }), [drawnArea, scheduleUiSave])
@@ -2717,6 +2818,31 @@ function App() {
     const toggleLayer = useCallback((id) => {
         setLayers((prev) => prev.map((l) => (l.id === id ? { ...l, visible: !l.visible } : l)))
     }, [])
+
+    const refreshOpsStatus = useCallback(async () => {
+        setOpsLoading(true)
+        setOpsError(null)
+        try {
+            const [sumRes, qcRes] = await Promise.all([
+                fetch(`${LEGACY_API_URL}/ops/sa-chunks/summary`),
+                fetch(`${LEGACY_API_URL}/ops/quickcheck/latest?limit=10`),
+            ])
+            if (!sumRes.ok) throw new Error(`Ops summary HTTP ${sumRes.status}`)
+            if (!qcRes.ok) throw new Error(`Quickcheck HTTP ${qcRes.status}`)
+            const sumJson = await sumRes.json()
+            const qcJson = await qcRes.json()
+            setOpsSummary(sumJson || null)
+            setOpsQuickcheck(qcJson || null)
+        } catch (e) {
+            setOpsError(e?.message || String(e))
+        } finally {
+            setOpsLoading(false)
+        }
+    }, [])
+
+    useEffect(() => {
+        refreshOpsStatus()
+    }, [refreshOpsStatus])
 
     useEffect(() => {
         if (!devUi) return
@@ -2876,17 +3002,12 @@ function App() {
                     { ...(prevById.get('tiles') || { id: 'tiles', name: 'Basiskarte', visible: true, color: '#888' }) },
                     { ...(prevById.get('flow') || { id: 'flow', name: 'Risikoklassen', visible: true, color: '#00e5ff' }) },
                     { ...(prevById.get('corridors') || { id: 'corridors', name: 'Abflusskorridore', visible: false, color: '#00bcd4' }) },
+                    { ...(prevById.get('hotspots') || { id: 'hotspots', name: 'Hotspots', visible: true, color: '#ffffff' }) },
+                    { ...(prevById.get('pointcheck') || { id: 'pointcheck', name: 'Objekt-Check (Punktmarker)', visible: true, color: '#ff4d4f' }) },
                     { ...(prevById.get('catchment') || { id: 'catchment', name: 'Einzugsgebiet', visible: false, color: '#e5e7eb' }) },
+                    { ...(prevById.get('official_extent') || { id: 'official_extent', name: 'Amtlich: Überschwemmungsgebiete (ÜSG)', visible: false, color: '#76ff03' }) },
+                    { ...(prevById.get('official_depth') || { id: 'official_depth', name: 'Amtlich: Wassertiefen', visible: false, color: '#00bcd4' }) },
                 ]
-                if (cfg.supports.extent) {
-                    const p = prevById.get('official_extent')
-                    next.push({ id: 'official_extent', name: 'Amtlich: Ueberflutungsgrenze', visible: p?.visible ?? false, color: '#76ff03' })
-                }
-            if (cfg.supports.depth) {
-                const p = prevById.get('official_depth')
-                const name = aoiProvider === 'sachsen-anhalt' ? 'Amtlich: Wassertiefen' : 'Amtlich: Ueberflutungstiefe'
-                next.push({ id: 'official_depth', name, visible: p?.visible ?? false, color: '#00bcd4' })
-            }
             return next
         })
         setOfficialScenario((s) => (cfg.scenarios?.[s] ? s : 'mw'))
@@ -2900,7 +3021,7 @@ function App() {
         // Keep layer labels aligned with the selected analysis mode.
         setLayers((prev) => prev.map((l) => {
             if (l.id !== 'flow') return l
-            const name = analysisType === 'erosion' ? 'Erosionsklassen' : 'Risikoklassen'
+            const name = isErosionLikeAnalysis(analysisType) ? 'Erosionsklassen' : 'Risikoklassen'
             return { ...l, name }
         }))
         // Switching the analysis mode should not leave stale results on screen.
@@ -2950,7 +3071,7 @@ function App() {
                     setSelectedHotspot(top)
                     setFitKey((k) => k + 1)
                     const kind = String(data?.analysis?.kind || '').toLowerCase()
-                    const label = kind === 'erosion' ? 'mittlerer Erosionsindex' : 'mittleres Risiko'
+                    const label = (kind === 'erosion' || kind === 'abag') ? 'mittlerer Erosionsindex' : 'mittleres Risiko'
                     const wx = (kind === 'starkregen' && wClass && wClass !== 'n/a') ? `, Vorfeuchte ${wClass}` : ''
                     setStatus(`Analyse fertig: ${n} Segmente, ${label} ${mean ?? '-'} / 100${wx}`)
                 },
@@ -2983,8 +3104,11 @@ function App() {
             const event1h = (at === 'starkregen' && Number.isFinite(Number(selectedRainEvent?.max_1h_mm)))
                 ? `&weather_event_mm_h=${encodeURIComponent(String(Number(selectedRainEvent.max_1h_mm)))}`
                 : ''
+            const abagP = at === 'abag'
+                ? `&abag_p_factor=${encodeURIComponent(String(abagPFactor))}`
+                : ''
             await runStreamingRequest(
-                `${LEGACY_API_URL}/analyze-bbox?threshold=${threshold}&provider=${encodeURIComponent(aoiProvider)}&dem_source=${encodeURIComponent(demSource)}&analysis_type=${encodeURIComponent(at)}${isStPublic ? `&st_parts=${encodeURIComponent(parts)}` : ''}${confirm}${cacheDir}${event1h}`,
+                `${LEGACY_API_URL}/analyze-bbox?threshold=${threshold}&provider=${encodeURIComponent(aoiProvider)}&dem_source=${encodeURIComponent(demSource)}&analysis_type=${encodeURIComponent(at)}${isStPublic ? `&st_parts=${encodeURIComponent(parts)}` : ''}${confirm}${cacheDir}${event1h}${abagP}`,
                 {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -2999,13 +3123,13 @@ function App() {
                     }),
                 },
             )
-    }, [stPublicParts, stPublicConfirm, stPublicCacheDir, selectedRainEvent, runStreamingRequest, threshold, aoiProvider, demSource, drawnArea])
+    }, [stPublicParts, stPublicConfirm, stPublicCacheDir, selectedRainEvent, runStreamingRequest, threshold, aoiProvider, demSource, drawnArea, abagPFactor])
 
     const handleBboxAnalyze = useCallback(async () => {
         if (!drawnArea) return
         // Ensure normal map interaction during/after analysis (drawing disables dragging and can affect touch-zoom).
         setDrawActive(false)
-        const at = (analysisType === 'erosion') ? 'erosion' : 'starkregen'
+        const at = normalizeAnalysisType(analysisType)
         const isStPublic = aoiProvider === 'sachsen-anhalt' && demSource === 'public'
 
         if (apiMode !== 'jobs') {
@@ -3033,6 +3157,7 @@ function App() {
                     provider: aoiProvider || 'auto',
                     dem_source: demSource || 'wcs',
                     analysis_type: at,
+                    abag_p_factor: at === 'abag' ? abagPFactor : undefined,
                     st_parts: isStPublic ? parts : undefined,
                     dem_cache_dir: isStPublic && stPublicCacheDir.trim() ? stPublicCacheDir.trim() : undefined,
                     bbox: {
@@ -3105,7 +3230,7 @@ function App() {
             const n = geojson?.features?.length ?? 0
             const mean = geojson?.analysis?.metrics?.risk_score_mean
             const kind = String(geojson?.analysis?.kind || '').toLowerCase()
-            const label = kind === 'erosion' ? 'mittlerer Erosionsindex' : 'mittleres Risiko'
+            const label = (kind === 'erosion' || kind === 'abag') ? 'mittlerer Erosionsindex' : 'mittleres Risiko'
             setStatus(`Analyse fertig: ${n} Segmente, ${label} ${mean ?? '-'} / 100`)
             setProgressInfo({ step: 4, total: 4, message: 'Fertig.' })
         } catch (err) {
@@ -3134,6 +3259,7 @@ function App() {
         apiMode,
         jobSel,
         threshold,
+        abagPFactor,
         runStreamingRequest,
         aoiProvider,
         demSource,
@@ -3177,19 +3303,25 @@ function App() {
     }, [geoJsonData, selectedHotspot])
 
     const bm = BASEMAPS[basemap]
-    const showTiles = layers.find((l) => l.id === 'tiles')?.visible ?? true
+    const showTiles = true
     const showFlow = layers.find((l) => l.id === 'flow')?.visible ?? true
     const showCorridors = layers.find((l) => l.id === 'corridors')?.visible ?? false
+    const showHotspots = layers.find((l) => l.id === 'hotspots')?.visible ?? true
+    const showPointCheck = layers.find((l) => l.id === 'pointcheck')?.visible ?? true
     const showCatchment = layers.find((l) => l.id === 'catchment')?.visible ?? false
     // Note: we intentionally do not gate clicks by catchment polygon.
     // Users must be able to set a new catchment point by clicking any segment.
     const showOfficialExtent = layers.find((l) => l.id === 'official_extent')?.visible ?? false
     const showOfficialDepth = layers.find((l) => l.id === 'official_depth')?.visible ?? false
-    const helpRouteActive = hash === '#/hilfe'
-    const sourcesRouteActive = hash === '#/daten'
+    const layerAvailability = useMemo(() => ({
+        official_extent: !!officialLayerName(aoiProvider, 'extent', officialScenario),
+        official_depth: !!officialLayerName(aoiProvider, 'depth', officialScenario),
+    }), [aoiProvider, officialScenario])
+    const helpRouteActive = hash.startsWith('#/hilfe')
+    const sourcesRouteActive = hash.startsWith('#/daten')
 
     useEffect(() => {
-        const onHash = () => setHash(window.location.hash || '#/')
+        const onHash = () => setHash(normalizeHashRoute(window.location.hash))
         window.addEventListener('hashchange', onHash)
         return () => window.removeEventListener('hashchange', onHash)
     }, [])
@@ -3233,7 +3365,7 @@ function App() {
         const sliderFrac = Number(preset?.min_frac_of_max || 0)
         // Starkregen: the slider is the primary control (users expect immediate effect).
         // Erosion: keep a small automatic coarsening when zoomed out to avoid visual overload.
-        const zoomFrac = (analysisType === 'erosion') ? zoomMinFracForNet(mapViewLive?.zoom) : 0.0
+        const zoomFrac = isErosionLikeAnalysis(analysisType) ? zoomMinFracForNet(mapViewLive?.zoom) : 0.0
         const frac = Math.max(Number.isFinite(sliderFrac) ? sliderFrac : 0, Number.isFinite(zoomFrac) ? zoomFrac : 0)
         if (!Number.isFinite(frac) || frac <= 0) return geoJsonData
         const mx = Number(maxCorridorKm2)
@@ -3251,7 +3383,7 @@ function App() {
 
     const displayFlowGeojson = useMemo(() => {
         if (!geoJsonData) return null
-        if (analysisType === 'erosion') {
+        if (isErosionLikeAnalysis(analysisType)) {
             // Erosion: avoid dense "zebra" networks; show only critical segments.
             return pickCriticalErosionSegments(geoJsonData, 250)
         }
@@ -3285,15 +3417,19 @@ function App() {
     }, [drawActive])
 
     useEffect(() => {
-        // Catchment is tied to the "current point". Clear when inputs change.
+        // Catchment is tied to the current result/point. Clear when result or AOI changes.
         setCatchmentGeojson(null)
         setCatchmentMeta(null)
         setCatchmentError(null)
         setCatchmentFor(null)
         setPoi(null)
+    }, [geoJsonData, drawnArea])
+
+    useEffect(() => {
+        // Workflow gating reset only on AOI change, not after each finished analysis.
         setSelectedRainEvent(null)
         setWeatherUiState({ ready: false, loading: false, error: null })
-    }, [geoJsonData, drawnArea])
+    }, [drawnArea])
 
     useEffect(() => {
         if (!showCatchment) return
@@ -3312,7 +3448,7 @@ function App() {
 
         ;(async () => {
             try {
-                const at = (analysisType === 'erosion') ? 'erosion' : 'starkregen'
+                const at = normalizeAnalysisType(analysisType)
                 const isStPublic = aoiProvider === 'sachsen-anhalt' && demSource === 'public'
                 const parts = stPublicParts?.length ? stPublicParts.join(',') : '1'
                 const confirm = isStPublic && stPublicConfirm ? '&public_confirm=true' : ''
@@ -3502,6 +3638,7 @@ function App() {
                         {[
                             { id: 'starkregen', label: 'Starkregen', icon: 'rain' },
                             { id: 'erosion', label: 'Erosion', icon: 'mountain' },
+                            { id: 'abag', label: 'ABAG', icon: 'field' },
                             { id: 'sediment', label: 'Sediment', icon: 'sediment', disabled: true },
                         ].map((opt) => (
                             <button
@@ -3525,6 +3662,13 @@ function App() {
                                             <path d="M3 19l7-12l4 7l2-3l5 8H3z" fill="currentColor" opacity="0.92" />
                                         </svg>
                                     )}
+                                    {opt.icon === 'field' && (
+                                        <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                                            <path d="M3 18h18v2H3z" fill="currentColor" opacity="0.92" />
+                                            <path d="M4 16c2.2-2 4.4-2 6.6 0c2.2 2 4.4 2 6.6 0c1.2-1.1 2.4-1.6 3.6-1.6v2.2c-1.2 0-2.4.5-3.6 1.6c-2.2 2-4.4 2-6.6 0c-2.2-2-4.4-2-6.6 0z" fill="currentColor" opacity="0.82" />
+                                            <path d="M7 9c0-1.7 1.3-3 3-3c0 1.7-1.3 3-3 3zm7 0c0-1.7 1.3-3 3-3c0 1.7-1.3 3-3 3z" fill="currentColor" opacity="0.88" />
+                                        </svg>
+                                    )}
                                     {opt.icon === 'sediment' && (
                                         <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
                                             <path d="M4 14c3 0 3-2 6-2s3 2 6 2s3-2 4-2v6H4v-2z" fill="currentColor" opacity="0.92" />
@@ -3540,13 +3684,33 @@ function App() {
                     <div className="analysis-meta">
                         <div className="analysis-meta-row">
                             <div className="analysis-desc" style={{ marginTop: 0 }}>
-                                {analysisType === 'erosion'
-                                    ? 'Erosions-Treiber, Hotspots'
+                                {isErosionLikeAnalysis(analysisType)
+                                    ? (analysisType === 'abag' ? 'ABAG (langfristig), Hotspots' : 'Erosions-Treiber, Hotspots')
                                     : analysisType === 'sediment'
                                         ? 'Sedimentpfade, Ablagerung (demnaechst)'
                                     : 'Abflusswege, Sammelpunkte, Hotspots'}
                             </div>
                         </div>
+                        {analysisType === 'abag' && (
+                            <div className="analysis-meta-row" style={{ marginTop: 10 }}>
+                                <label style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%' }}>
+                                    <span style={{ fontSize: 12, opacity: 0.9 }}>P-Faktor (Massnahmen am Schlag)</span>
+                                    <select
+                                        value={abagPKey}
+                                        onChange={(e) => setAbagPKey(String(e.target.value))}
+                                        disabled={loading || !analysisStepEnabled}
+                                        aria-label="ABAG P-Faktor"
+                                    >
+                                        {ABAG_P_PRESETS.map((opt) => (
+                                            <option key={opt.key} value={opt.key}>{opt.label}</option>
+                                        ))}
+                                    </select>
+                                    <span style={{ fontSize: 12, opacity: 0.75 }}>
+                                        Aktiver P-Wert: {abagPFactor.toFixed(2)} (kleiner = mehr Schutz)
+                                    </span>
+                                </label>
+                            </div>
+                        )}
                     </div>
                     <div className="bbox-actions" style={{ marginTop: 12 }}>
                         <button
@@ -3709,6 +3873,54 @@ function App() {
                     </div>
                 )}
 
+                <div className="section">
+                    <details open>
+                        <summary><strong>Betriebsstatus (SA + Quick-Check)</strong></summary>
+                        <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
+                            <div className="bbox-actions" style={{ gap: 10, alignItems: 'center' }}>
+                                <button className="bbox-redraw-btn" type="button" onClick={refreshOpsStatus} disabled={opsLoading}>
+                                    {opsLoading ? 'Aktualisiere...' : 'Status aktualisieren'}
+                                </button>
+                            </div>
+                            {opsError && <p className="status-error">Ops: {opsError}</p>}
+
+                            <div className="weather-event-card">
+                                <div className="weather-event-card-head">
+                                    <strong>SA-Chunk Lauf</strong>
+                                    <span>{opsSummary?.state?.run_id || '-'}</span>
+                                </div>
+                                <div className="weather-event-card-body" style={{ display: 'grid', gap: 4 }}>
+                                    <span>Chunk-CSV: {opsSummary?.chunk_csv_count ?? '-'}</span>
+                                    <span>Done-Flags: {opsSummary?.done_flags_count ?? '-'}</span>
+                                    <span>Merged-QA: {String(opsSummary?.merged_qa?.ok ?? '-')}</span>
+                                    <span>Rows merged: {opsSummary?.merged_qa?.rows_total ?? '-'}</span>
+                                </div>
+                            </div>
+
+                            <div className="weather-event-card">
+                                <div className="weather-event-card-head">
+                                    <strong>Quick-Check</strong>
+                                    <span>{formatUtcShort(opsQuickcheck?.manifest?.generated_at_utc)}</span>
+                                </div>
+                                <div className="weather-event-card-body" style={{ display: 'grid', gap: 4 }}>
+                                    <span>Verfuegbar: {String(opsQuickcheck?.available ?? false)}</span>
+                                    <span>Top-10 Felder: {Array.isArray(opsQuickcheck?.top_rows) ? opsQuickcheck.top_rows.length : 0}</span>
+                                </div>
+                                {Array.isArray(opsQuickcheck?.top_rows) && opsQuickcheck.top_rows.length > 0 && (
+                                    <div style={{ marginTop: 8, maxHeight: 180, overflow: 'auto', borderTop: '1px solid #2b3647', paddingTop: 8 }}>
+                                        {opsQuickcheck.top_rows.map((r, idx) => (
+                                            <div key={`${r.field_id || 'f'}-${idx}`} style={{ fontSize: 12, marginBottom: 6, display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                                                <span style={{ opacity: 0.9 }}>{idx + 1}. {String(r.field_id || '-')}</span>
+                                                <span style={{ opacity: 0.8 }}>Score {String(r.score || '-')}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </details>
+                </div>
+
                 <StatsBox data={geoJsonData} />
                 <ScenarioBox data={geoJsonData} />
                 <HotspotList
@@ -3747,6 +3959,7 @@ function App() {
                         catchmentLoading={catchmentLoading}
                         catchmentMeta={catchmentMeta}
                         catchmentError={catchmentError}
+                        layerAvailability={layerAvailability}
                     />
                     {showTiles && (
                         <TileLayer
@@ -3835,8 +4048,8 @@ function App() {
                                     interactive={false}
                                     style={(feature) => ({
                                         color: riskColorOf(feature),
-                                        weight: analysisType === 'erosion' ? 3.2 : 2.5,
-                                        opacity: analysisType === 'erosion' ? 0.95 : 0.9,
+                                        weight: isErosionLikeAnalysis(analysisType) ? 3.2 : 2.5,
+                                        opacity: isErosionLikeAnalysis(analysisType) ? 0.95 : 0.9,
                                     })}
                                 />
                             </Pane>
@@ -3936,7 +4149,7 @@ function App() {
                             </Pane>
                         )}
                         <FitBounds geojson={geoJsonData} triggerKey={fitKey} enabled={!drawActive} sidebarOpen={sidebarOpen} />
-                        {selectedHotspot && (
+                        {showHotspots && selectedHotspot && (
                             <CircleMarker
                                 center={[Number(selectedHotspot.lat), Number(selectedHotspot.lon)]}
                                 radius={8}
@@ -3961,14 +4174,14 @@ function App() {
                                 </Popup>
                             </CircleMarker>
                         )}
-                        {pointCheck && Number.isFinite(Number(pointCheck.lat)) && Number.isFinite(Number(pointCheck.lon)) && (
+                        {showPointCheck && pointCheck && Number.isFinite(Number(pointCheck.lat)) && Number.isFinite(Number(pointCheck.lon)) && (
                             <CircleMarker
                                 center={[Number(pointCheck.lat), Number(pointCheck.lon)]}
                                 radius={6}
                                 pathOptions={{ color: '#ffffff', weight: 2, fillColor: '#111827', fillOpacity: 0.9 }}
                             />
                         )}
-                        <PointCheckPopup pointCheck={pointCheck} onClose={() => setPointCheck(null)} />
+                        {showPointCheck && <PointCheckPopup pointCheck={pointCheck} onClose={() => setPointCheck(null)} />}
                     </>
                 )}
             </MapContainer>

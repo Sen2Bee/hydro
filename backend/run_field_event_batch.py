@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import concurrent.futures
 import requests
 
 FIELDNAMES = [
@@ -856,7 +857,53 @@ def run(args: argparse.Namespace) -> int:
             continue
 
         for ev in field_events:
-            for mode in modes:
+            # --- parallel dispatch of all modes for this field+event ---
+            def _make_call(mode_name: str) -> tuple[str, dict | None, Exception | None]:
+                """Fire one analyze-bbox call; returns (mode, result_or_None, error_or_None)."""
+                try:
+                    if mode_name == "erosion_events_ml":
+                        r = _call_analyze_bbox(
+                            base_url=args.api_base_url,
+                            aoi=fld,
+                            analysis_type="erosion_events_ml",
+                            provider=args.provider,
+                            dem_source=args.dem_source,
+                            threshold=args.threshold,
+                            event_start_iso=ev.event_start_iso,
+                            event_end_iso=ev.event_end_iso,
+                            ml_model_key=args.ml_model_key,
+                            ml_severity_model_key=args.ml_severity_model_key,
+                            ml_threshold=args.ml_threshold,
+                            timeout_s=args.timeout_s,
+                            request_retries=args.request_retries,
+                        )
+                    elif mode_name == "abag":
+                        r = _call_analyze_bbox(
+                            base_url=args.api_base_url,
+                            aoi=fld,
+                            analysis_type="abag",
+                            provider=args.provider,
+                            dem_source=args.dem_source,
+                            threshold=args.threshold,
+                            abag_p_factor=args.abag_p_factor,
+                            timeout_s=args.timeout_s,
+                            request_retries=args.request_retries,
+                        )
+                    else:
+                        raise RuntimeError(f"Unbekannter analysis mode: {mode_name}")
+                    return (mode_name, r, None)
+                except Exception as exc:
+                    return (mode_name, None, exc)
+
+            # Submit all modes in parallel (uses backend uvicorn workers)
+            if len(modes) > 1:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(modes)) as pool:
+                    futures = {pool.submit(_make_call, m): m for m in modes}
+                    mode_results = [f.result() for f in concurrent.futures.as_completed(futures)]
+            else:
+                mode_results = [_make_call(modes[0])]
+
+            for mode, res, err in mode_results:
                 n_done += 1
                 pct = (float(n_done) / float(n_total) * 100.0) if n_total > 0 else 0.0
                 elapsed_s = max(0.001, (dt.datetime.now(tz=dt.timezone.utc) - started).total_seconds())
@@ -873,128 +920,52 @@ def run(args: argparse.Namespace) -> int:
                         f"[{n_done} | ETA {eta_txt}] "
                         f"field={fld.field_id} event={ev.event_id} mode={mode}"
                     )
-                if mode == "erosion_events_ml":
-                    try:
-                        res = _call_analyze_bbox(
-                            base_url=args.api_base_url,
-                            aoi=fld,
-                            analysis_type="erosion_events_ml",
-                            provider=args.provider,
-                            dem_source=args.dem_source,
-                            threshold=args.threshold,
-                            event_start_iso=ev.event_start_iso,
-                            event_end_iso=ev.event_end_iso,
-                            ml_model_key=args.ml_model_key,
-                            ml_severity_model_key=args.ml_severity_model_key,
-                            ml_threshold=args.ml_threshold,
-                            timeout_s=args.timeout_s,
-                            request_retries=args.request_retries,
-                        )
-                    except Exception as exc:
-                        if not args.continue_on_error:
-                            raise
-                        rows_out.append(
-                            {
-                                "field_id": fld.field_id,
-                                "event_id": ev.event_id,
-                                "event_start_iso": ev.event_start_iso,
-                                "event_end_iso": ev.event_end_iso,
-                                "event_source": ev.event_source,
-                                "event_peak_iso": ev.event_peak_iso,
-                                "event_severity": ev.event_severity,
-                                "event_neighbor_cell_id": ev.event_neighbor_cell_id,
-                                "event_neighbor_distance_km": ev.event_neighbor_distance_km,
-                                "analysis_type": mode,
-                                "metric_type": None,
-                                "risk_score_mean": None,
-                                "risk_score_max": None,
-                                "event_probability_mean": None,
-                                "event_probability_p90": None,
-                                "event_probability_max": None,
-                                "event_detected_share_percent": None,
-                                "abag_index_mean": None,
-                                "abag_index_p90": None,
-                                "abag_index_max": None,
-                                "network_length_km": None,
-                                "aoi_area_km2": None,
-                                "model_version": None,
-                                "ml_model_key_used": None,
-                                "ml_severity_model_key_used": None,
-                                "abag_c_factor_raster_path": None,
-                                "nodata_only": None,
-                                "dem_valid_cell_share": None,
-                                "dem_nodata_cell_share": None,
-                                "status": "error",
-                                "error": str(exc),
-                            }
-                        )
-                        print(f"  [skip] {exc}")
-                        since_checkpoint += 1
-                        if since_checkpoint >= checkpoint_every:
-                            _write_checkpoint_csv(out_csv, rows_out)
-                            print(f"  [checkpoint] {len(rows_out)} rows -> {out_csv}")
-                            since_checkpoint = 0
-                        continue
-                elif mode == "abag":
-                    try:
-                        res = _call_analyze_bbox(
-                            base_url=args.api_base_url,
-                            aoi=fld,
-                            analysis_type="abag",
-                            provider=args.provider,
-                            dem_source=args.dem_source,
-                            threshold=args.threshold,
-                            abag_p_factor=args.abag_p_factor,
-                            timeout_s=args.timeout_s,
-                            request_retries=args.request_retries,
-                        )
-                    except Exception as exc:
-                        if not args.continue_on_error:
-                            raise
-                        rows_out.append(
-                            {
-                                "field_id": fld.field_id,
-                                "event_id": ev.event_id,
-                                "event_start_iso": ev.event_start_iso,
-                                "event_end_iso": ev.event_end_iso,
-                                "event_source": ev.event_source,
-                                "event_peak_iso": ev.event_peak_iso,
-                                "event_severity": ev.event_severity,
-                                "event_neighbor_cell_id": ev.event_neighbor_cell_id,
-                                "event_neighbor_distance_km": ev.event_neighbor_distance_km,
-                                "analysis_type": mode,
-                                "metric_type": None,
-                                "risk_score_mean": None,
-                                "risk_score_max": None,
-                                "event_probability_mean": None,
-                                "event_probability_p90": None,
-                                "event_probability_max": None,
-                                "event_detected_share_percent": None,
-                                "abag_index_mean": None,
-                                "abag_index_p90": None,
-                                "abag_index_max": None,
-                                "network_length_km": None,
-                                "aoi_area_km2": None,
-                                "model_version": None,
-                                "ml_model_key_used": None,
-                                "ml_severity_model_key_used": None,
-                                "abag_c_factor_raster_path": None,
-                                "nodata_only": None,
-                                "dem_valid_cell_share": None,
-                                "dem_nodata_cell_share": None,
-                                "status": "error",
-                                "error": str(exc),
-                            }
-                        )
-                        print(f"  [skip] {exc}")
-                        since_checkpoint += 1
-                        if since_checkpoint >= checkpoint_every:
-                            _write_checkpoint_csv(out_csv, rows_out)
-                            print(f"  [checkpoint] {len(rows_out)} rows -> {out_csv}")
-                            since_checkpoint = 0
-                        continue
-                else:
-                    raise RuntimeError(f"Unbekannter analysis mode: {mode}")
+
+                if err is not None:
+                    if not args.continue_on_error:
+                        raise err
+                    rows_out.append(
+                        {
+                            "field_id": fld.field_id,
+                            "event_id": ev.event_id,
+                            "event_start_iso": ev.event_start_iso,
+                            "event_end_iso": ev.event_end_iso,
+                            "event_source": ev.event_source,
+                            "event_peak_iso": ev.event_peak_iso,
+                            "event_severity": ev.event_severity,
+                            "event_neighbor_cell_id": ev.event_neighbor_cell_id,
+                            "event_neighbor_distance_km": ev.event_neighbor_distance_km,
+                            "analysis_type": mode,
+                            "metric_type": None,
+                            "risk_score_mean": None,
+                            "risk_score_max": None,
+                            "event_probability_mean": None,
+                            "event_probability_p90": None,
+                            "event_probability_max": None,
+                            "event_detected_share_percent": None,
+                            "abag_index_mean": None,
+                            "abag_index_p90": None,
+                            "abag_index_max": None,
+                            "network_length_km": None,
+                            "aoi_area_km2": None,
+                            "model_version": None,
+                            "ml_model_key_used": None,
+                            "ml_severity_model_key_used": None,
+                            "abag_c_factor_raster_path": None,
+                            "nodata_only": None,
+                            "dem_valid_cell_share": None,
+                            "dem_nodata_cell_share": None,
+                            "status": "error",
+                            "error": str(err),
+                        }
+                    )
+                    print(f"  [skip] {err}")
+                    since_checkpoint += 1
+                    if since_checkpoint >= checkpoint_every:
+                        _write_checkpoint_csv(out_csv, rows_out)
+                        print(f"  [checkpoint] {len(rows_out)} rows -> {out_csv}")
+                        since_checkpoint = 0
+                    continue
 
                 metrics, assumptions = _extract_metrics(res)
                 nodata_only, dem_valid_cell_share, dem_nodata_cell_share = _extract_diagnostics(metrics)

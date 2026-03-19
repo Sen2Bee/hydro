@@ -312,14 +312,21 @@ html {
   height: 34px;
   border-radius: 10px;
   border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(0, 0, 0, 0.22);
-  color: rgba(255, 255, 255, 0.8);
+  background: rgba(0, 0, 0, 0.38);
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1;
+  text-shadow: 0 0 1px rgba(0, 0, 0, 0.55);
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .place-search-btn:hover {
-  border-color: rgba(255, 255, 255, 0.28);
-  color: rgba(255, 255, 255, 0.95);
+  border-color: rgba(255, 255, 255, 0.4);
+  color: rgba(255, 255, 255, 1);
 }
 
 .place-search-dropdown {
@@ -956,7 +963,9 @@ html {
 }
 
 .pointcheck-popup .leaflet-popup-close-button {
-  color: rgba(255, 255, 255, 0.78) !important;
+  color: rgba(255, 255, 255, 0.96) !important;
+  font-weight: 700;
+  text-shadow: 0 0 1px rgba(0, 0, 0, 0.55);
 }
 
 .pointcheck-popup .leaflet-popup-close-button:hover {
@@ -1053,19 +1062,21 @@ html {
   height: 28px;
   border-radius: 10px;
   border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(0, 0, 0, 0.22);
-  color: rgba(255, 255, 255, 0.86);
+  background: rgba(0, 0, 0, 0.38);
+  color: rgba(255, 255, 255, 0.98);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   line-height: 1;
-  font-size: 18px;
+  font-size: 20px;
+  font-weight: 700;
+  text-shadow: 0 0 1px rgba(0, 0, 0, 0.55);
 }
 
 .map-search-close:hover {
-  border-color: rgba(255, 255, 255, 0.28);
-  color: rgba(255, 255, 255, 0.98);
+  border-color: rgba(255, 255, 255, 0.4);
+  color: rgba(255, 255, 255, 1);
 }
 
 .place-search.place-search--map {
@@ -1155,9 +1166,10 @@ html {
 }
 
 .map-layer-dropdown {
-  position: absolute;
-  bottom: 48px;
-  right: 0;
+  position: fixed;
+  top: 50%;
+  transform: translateY(-50%);
+  right: 60px; /* 16px map-controls right + 40px button + 4px gap */
   width: 200px;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
@@ -1165,6 +1177,30 @@ html {
   padding: 10px 12px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
   backdrop-filter: blur(10px);
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(185, 197, 214, 0.45) rgba(255, 255, 255, 0.08);
+  z-index: 1001;
+}
+
+.map-layer-dropdown::-webkit-scrollbar {
+  width: 8px;
+}
+
+.map-layer-dropdown::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+}
+
+.map-layer-dropdown::-webkit-scrollbar-thumb {
+  background: rgba(185, 197, 214, 0.45);
+  border-radius: 999px;
+}
+
+.map-layer-dropdown::-webkit-scrollbar-thumb:hover {
+  background: rgba(185, 197, 214, 0.62);
 }
 
 .map-layer-section {
@@ -1178,6 +1214,49 @@ html {
 
 .map-layer-section:first-child {
   margin-top: 0;
+}
+
+.map-layer-accordion-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: transparent;
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-muted);
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 7px 0 5px;
+  margin-top: 6px;
+  cursor: pointer;
+}
+
+.map-layer-accordion-head:first-of-type {
+  margin-top: 0;
+  border-top: none;
+}
+
+.map-layer-accordion-chevron {
+  width: 12px;
+  height: 12px;
+  display: inline-grid;
+  place-items: center;
+  line-height: 1;
+  transition: transform 140ms ease;
+}
+
+.map-layer-accordion-chevron svg {
+  width: 12px;
+  height: 12px;
+  display: block;
+}
+
+.map-layer-accordion-chevron.open {
+  transform: rotate(180deg);
 }
 
 .map-layer-item {
@@ -1277,6 +1356,50 @@ html {
   margin-top: 4px;
   font-size: 0.68rem;
   color: var(--text-muted);
+}
+
+.map-layer-class-legend {
+  margin: 2px 0 6px 26px;
+  display: grid;
+  gap: 3px;
+}
+
+.map-layer-legend-img-wrap {
+  margin: 3px 0 7px 26px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  background: rgba(7, 12, 24, 0.45);
+  padding: 3px;
+}
+
+.map-layer-legend-img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+}
+
+.map-layer-class-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.map-layer-class-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  flex: 0 0 auto;
+}
+
+.map-layer-class-text {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .map-layer-net-legend-compact {
@@ -1785,8 +1908,10 @@ html {
 
 .weather-event-card-body {
   margin-top: 4px;
-  display: grid;
-  gap: 1px;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
   font-size: 0.75rem;
   line-height: 1.2;
   opacity: 0.94;
@@ -2037,8 +2162,8 @@ html {
 
 .help-page {
   min-height: 100vh;
-  background: radial-gradient(1200px 700px at 80% -10%, rgba(0, 229, 255, 0.12), transparent 55%), var(--bg-primary);
-  color: var(--text-primary);
+  background: radial-gradient(1200px 700px at 80% -10%, rgba(0, 229, 255, 0.12), transparent 55%), #0d1117;
+  color: #e9f4ff;
   padding: 24px 18px 40px;
 }
 
@@ -2060,6 +2185,7 @@ html {
 .help-page-head h1 {
   font-size: 1.5rem;
   margin: 0;
+  color: #e9f4ff;
 }
 
 .help-back-btn {
@@ -2077,8 +2203,8 @@ html {
 }
 
 .help-page-section {
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
+  background: rgba(17, 25, 40, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: var(--radius-md);
   padding: 14px;
 }
@@ -2086,11 +2212,12 @@ html {
 .help-page-section h2 {
   margin: 0 0 8px;
   font-size: 1rem;
+  color: #9deeff;
 }
 
 .help-page-section p,
 .help-page-section li {
-  color: var(--text-secondary);
+  color: #d8e7f5;
   font-size: 0.86rem;
   line-height: 1.5;
 }

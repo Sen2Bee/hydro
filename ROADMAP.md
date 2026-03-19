@@ -1,131 +1,183 @@
-# Hydrowatch Roadmap (geordnet, MVP -> Ausbau)
+# Roadmap
 
-Stand: 16.02.2026
+## Zielbild
+Eine modulare Fachplattform aufbauen, die in Sachsen-Anhalt startet und aus einem gemeinsamen technischen Kern mehrere Fachsichten bedient: Landkreis/Kommune, LHW, LAU und Forschung. Der Einstieg erfolgt nicht als große neue Plattform, sondern als belastbarer Demonstrator, Fachmodul und Priorisierungswerkzeug.
 
-## 0) Wo stehen wir heute (MVP)
-- AOI (Rechteck/Polygon/GeoJSON) -> DEM-Clip (Sachsen-Anhalt: lokaler DGM1-COG Katalog; sonst WCS/Fallback).
-- Analyse-Modi:
-  - Starkregen: DEM-basiertes Abflussnetz + Risikoindikator + Hotspots (Screening).
-  - Erosion: topographischer Treiber + Hotspots (Screening).
-  - Amtliche Layer: als WMS-Overlays (Referenz).
-- Abflussnetz-Darstellung: "Netz anzeigen" + Slider "Netzdichte" (Filter relativ zum max. Einzugsgebiet in der AOI).
-- Catchment (Einzugsgebiet) als Polygon fuer angeklicktes Segment (optional, D8-basiert, AOI-Clip, Busy-UI).
-- Wetter ist als Kontext nutzbar (implementiert):
-  - Primaerquelle: ICON-D2 Grid/Modell (Open-Meteo), inkl. historisch/live/mixed Logik.
-  - `GET /abflussatlas/weather/stats` (automatische Stichprobenzahl je AOI-Groesse: 1/5/9, Quantile + API14).
-  - `GET /abflussatlas/weather/preset` (kompakt fuer UI: Vorfeuchte + Regenpresets).
-  - `GET /abflussatlas/weather/events` (automatische Starkregen-Ereigniserkennung mit Warnstufen; Quellenmodus `icon2d|dwd|radar|hybrid|hybrid_radar`).
-  - `POST /analyze-bbox` akzeptiert optional `weather_event_mm_h` (aus gewaehlt. Ereignis).
-  - Radar ist als echte Quelle angebunden: built-in DWD RADOLAN (CDC, stündlich) mit lokalem Cache; optional weiterhin externer Connector.
-  - UI-Prinzip bleibt: kein Quellen-Menue; Wetter vor Analyse, Datum + Uebernehmen, Eventauswahl ueber Bar-Chart.
+## Phase 1: Fundament in Sachsen-Anhalt
+Ziel: belastbare offene Datengrundlage lokal aufbauen.
 
-## 1) Naechste Stabilisierung (kurzfristig, "Produkt statt Prototyp")
-Ziel: weniger Reibung, weniger UI-Fehler, reproduzierbare Ergebnisse.
-- Starkregen/Netzdichte: sichtbare Dichte-Aenderung, klare Klassen, stabile Legende.
-- Objekt-Check: robustes "Snap-to-Line" je Zoomstufe (gross -> grobe Linien, klein -> fein).
-- Catchment UX:
-  - Progress/Busy-Feedback (Cursor/Spinner) durchgehend.
-  - Klicks nur wenn Segment gesnapt wurde (keine Punkte im "Nichts").
-  - Kein Auto-Zoom nach Catchment (Map bleibt steuerbar).
-- Performance:
-  - AOI Soft/Hard-Limits + Downsampling/Reduktion fuer grosse AOIs.
-  - Result-Caching: identische AOI + Parameter -> schneller.
-- Exporte (minimal):
-  - GeoJSON Export: Hotspots + Netz + Catchment.
-  - PDF Kurzreport (1 Seite) nur mit Kernaussagen + Quellen + Disclaimer.
+Arbeitspakete:
+1. DGM1 und DOM1 für Sachsen-Anhalt serverseitig vorhalten.
+2. Lizenz- und Namensnennungsregeln sauber dokumentieren.
+3. Weitere Grunddaten anbinden:
+   - Boden
+   - Regen und Ereignisse
+   - Versiegelung
+   - relevante offene Geodaten
+4. Erste Standardableitungen vorberechnen:
+   - Relief
+   - Fließwege
+   - Hangneigung
+   - Senken
+   - DOM1 minus DGM1 als Hindernis- und Barrierenproxy
 
-## 2) Wetterdaten: von "Kontext" zu "Parameter" (Phase 1)
-Ziel: Wetter in die Berechnung einfliessen lassen, ohne UI aufzublasen.
-- Datenstrategie (verbindlich):
-  - Primaer: Grid/Modell (`icon2dSmartFetch`) fuer flaechendeckende Werte.
-  - DWD nur explizit als Legacy-Modus (`WEATHER_PROVIDER=dwd`), kein stiller Fallback.
-- Ein API-Endpunkt fuer UI:
-  - `GET /abflussatlas/weather/preset?bbox=...&mode=auto|standard|genauer`
-  - Response: `moisture` (trocken/normal/nass) + `rainPreset` (moderat/stark/extrem mm/h) + `meta`
-  - `mode=auto`: kleinere AOI -> 1 Punkt, groessere AOI -> 5/9 Punkte (inset)
-- In Starkregen:
-  - Regen-Preset beeinflusst den `Rain`-Term im Risiko-Score (nicht hydraulisch, aber konsistent).
-  - Optional: ausgewaehltes historisches Ereignis (`max_1h_mm`) steuert `weather_event_mm_h`.
-  - Zeitraum wird aus `daysAgo/hours` im Preset-Endpunkt abgeleitet (safe window)
-- In Erosion:
-  - Wetter als Trigger/Skalierung (Vorfeuchte + Ereigniskontext), nicht als Haupttreiber
-- Apple-UI:
-  - Wetterblock reduziert: Zeitraum + Uebernehmen + kompakte Ereignisbalken
-  - Eventwahl nur ueber Balken; Detailkarte nur fuer aktives Ereignis
-  - Keine Zeitreihen im UI; Zeitreihen bleiben Debug/Export
+Ergebnis:
+Ein sauber dokumentierter, lokal verfügbarer Layer-Stack für Sachsen-Anhalt.
 
-### 2.1 Technischer Umbau Wetterquelle (direkt nach MVP-Stabilisierung)
-- Adapter `icon2dFacade`/`icon2dSmartFetch` in dieses Backend integriert.
-- `GET /abflussatlas/weather` und `/stats` laufen auf Grid-Quelle.
-- DWD bleibt als explizite Provider-Option (`WEATHER_PROVIDER=dwd`) fuer Referenz/Legacy.
-- Naechst: Ergebnisvergleich (Grid vs DWD) als QA-Check in 2-3 Referenz-AOIs dokumentieren.
+## Phase 2: Fachlicher Kern statt Großmodell
+Ziel: zuerst einen glaubwürdigen Rechenkern, noch ohne schweres Fremdmodell.
 
-## 3) Oeffentliche Basisdaten: "50/50 Kommune + Landwirtschaft" (Phase 2)
-Prinzip: keine neuen Menues pro Datensatz; Daten fliessen automatisch in Starkregen/Erosion ein.
+Arbeitspakete:
+1. Regel- und proxybasierten Kern definieren für:
+   - Starkregen- und Abfluss-Hotspots
+   - Erosionspriorisierung
+   - Hinderniswirkung
+   - Maßnahmenräume
+2. Bestehende Pipeline als Grundlage nutzen:
+   - Cache
+   - Chunking
+   - Resume
+   - QA
+   - Schlag- und Event-Logik
+3. Zusatzmodelle nur als spätere optionale Rechenmodi vorsehen.
 
-### 3.1 OSM Infrastruktur (sehr hoher Praxisnutzen)
-Vorhalten: ja (SA-Extrakt als PBF/GeoPackage; nightly refresh optional).
-Ergebnisse:
-- Engstellen-Ranking: Bruecken/Durchlaesse an Abflusskorridoren (kommunal).
-- "Wasser trifft Strasse": gefaehrdete Strassenabschnitte/Unterfuehrungen.
-- Vorflut-Pfad: Abflusskorridor -> naechster Graben/Gewaesser (Screening).
+Ergebnis:
+Ein robuster Kern, der fachlich nachvollziehbar ist und schnell demonstrierbar bleibt.
 
-### 3.2 Versiegelung / Built-Up (Copernicus Imperviousness, 10 m)
-Vorhalten: SA-Ausschnitt sinnvoll (oder live + Cache).
-Ergebnisse:
-- Runoff-Verstaerker: Versiegelung als Faktor im Score.
-- Hotspot-Begruendung: "hoher Versiegelungsgrad" besser belegt.
-Implementierungsziel (naechster Sprint):
-- Public Source Resolver + Download/Cache + AOI-windowed read
-- Layer-Metadaten im Ergebnis (`assumptions`, `sources`, dataset timestamp/version)
+## Phase 3: App-Kern bauen
+Ziel: ein zeigbarer Demonstrator.
 
-### 3.3 Landbedeckung (ESA WorldCover 10 m)
-Vorhalten: SA-Tiles (on-demand Cache ok).
-Ergebnisse:
-- Basisklassen fuer Runoff/rauheit (Screening).
-- Saison-Presets fuer Erosion (Sommer/Winter/zwischenfrucht) als einfache Auswahl.
+Gemeinsamer Kern:
+1. Datenhaltung
+2. Karten und Layer
+3. Ereignisse
+4. Hotspots
+5. Priorisierung
+6. Export
+7. Dokumentation
 
-## 4) Boden & Erosion fachlich robuster (Phase 3)
-Vorhalten: BGR BUEK200/250 oder Landesbodendaten (je Verfuegbarkeit) als AOI-Cache.
-Ergebnisse:
-- Versickerungs-/Abflussneigung (Boden-Proxy) als Layer + Score-Term.
-- Erosionsvulnerabilitaet: Kombination aus Hang (DEM) + Boden (BUEK) + Bedeckung (WorldCover/Presets).
-- Optional (klar als Screening markieren): USLE-nahe Kennzahl als Index (nicht "Gutachten").
+Wichtige Regel:
+Nicht institutionszentriert bauen, sondern rollen- und fragenzentriert.
 
-## 5) Amtliche Daten + Schutzgebiete als "Konfliktcheck" (Phase 4)
-Live: WMS/WFS, optional Cache.
-Ergebnisse:
-- Betroffenheit: Anteil AOI in UeSG/HQ-Zonen (amtlich).
-- Schutzgebiete/Wasserschutz: Overlay + automatisch generierte Hinweise (keine Rechtsberatung).
+Ergebnis:
+Ein kleines, verständliches, glaubwürdiges Frontend mit klaren Kernfunktionen.
 
-## 6) Massnahmen & Vergleich (Phase 5)
-Ziel: Praxisnutzen (Priorisierung + Wirksamkeit), ohne Simulation zu versprechen.
-- Massnahmen-Bibliothek (parametrisiert, verstaendlich):
-  - Pufferstreifen, Rueckhalt, Begruenung, Entsiegelung, Check-Dams.
-- Output:
-  - Vorher/Nachher Hotspots (Delta).
-  - "Top 10 Stellen mit groesster Wirkung" (Screening).
+## Phase 4: Fachsichten ableiten
+Ziel: aus einem Kern mehrere Nutzungssichten machen.
 
-## 7) Projektmodus (Phase 6)
-- Projekte: AOIs + Szenarien speichern.
-- Rollen: Kommune/Bauhof, Landwirtschaft, Planer.
-- Teilen: Link + Export (PDF/GeoJSON) inkl. Quellenblock.
+Sichten:
+1. Landkreis/Kommune
+   - Hotspots
+   - Maßnahmenräume
+   - Starkregenvorsorge
+2. LHW
+   - Fließwege
+   - Gewässerbezug
+   - Rückhalt
+   - Priorisierung kritischer Bereiche
+3. LAU
+   - Erosionsgefährdung
+   - Bodenschutz
+   - Bodenfunktionsbezug
+4. Forschung
+   - Methodenvergleich
+   - Szenarien
+   - Validierung
+   - Publikationen
 
-## UI-Prinzip (wichtig)
-- Keine "Daten-Menues". Stattdessen:
-  - Starkregen nutzt automatisch: Wetter + Versiegelung + Vorflut/OSM.
-  - Erosion nutzt automatisch: Boden + Landbedeckung + Saison-Preset.
-  - Optional Toggle: "Mehr Kontext" (zeigt zusaetzliche Overlays).
+Ergebnis:
+Keine getrennten Produkte, sondern mehrere fachliche Ansichten desselben Systems.
 
-## 8) Integrationspfad ABAG + Event-ML (neu)
-Ziel: zwei komplementaere Erosionsmodi produktiv machen, ohne den bestehenden MVP-Flow zu brechen:
-- `ABAG` fuer langfristiges Erosionsrisiko (klassisch, deutschlandweit skalierbar)
-- `Event-ML` fuer Lokalisierung konkreter Erosionsereignisse (datengetrieben, ereignisnah)
+## Phase 5: Paper-Linie parallel ausbauen
+Ziel: wissenschaftliche Legitimation und Türöffner schaffen.
 
-Verbindliche Leitplanken:
-- Kein Modus-Mix: ABAG und Event-ML bleiben methodisch getrennt.
-- Einheitliches Response-Schema (`analysis`, `hotspots`, `assumptions`, `sources`) fuer UI-Stabilitaet.
-- Klare Kennzeichnung in UX/Export: `langfristiger_index` vs. `ereignis_wahrscheinlichkeit`.
+Arbeitspakete:
+1. Manuskriptlinie weiterführen:
+   - produktionsreife Pipeline
+   - offene Datenbasis
+   - reproduzierbare Methodik
+2. Weitere Paper-Linien prüfen:
+   - Erosions-, Ereignis- und Maßnahmenbezug
+   - hydrologisch-geoökologische Vertiefung
+3. Fachlich passende Personen gezielt ansprechen:
+   - Markus Möller
+   - Michael Steininger
+   - Gerd Schmidt
 
-Umsetzungsdetails und Dateiplan:
-- Siehe `KONZEPT_EROSION_ABAG_ML.md`.
+Ergebnis:
+App plus Paper statt nur App.
+
+## Phase 6: Go-to-Market
+Ziel: niedrigschwelliger Einstieg in reale Kontexte.
+
+Vorgehen:
+1. kleinen Demonstrator zeigen
+2. gezielt Ansprechpartner identifizieren
+3. fachlich andocken, nicht hart verkaufen
+4. Feedback einholen
+5. Resonanz prüfen
+6. daraus Pilot oder Fachmodul entwickeln
+
+Positionierung:
+1. Pilot
+2. Analysemodul
+3. Priorisierungsdienst
+4. Zuarbeit für Konzepte, Planungen und Förderlogik
+
+Wichtige Regel:
+Nicht frontal gegen Platzhirsche antreten, sondern ergänzen statt ersetzen.
+
+## Phase 7: Strategische Andockpunkte
+Ziel: offene Fenster nutzen.
+
+Geeignete Felder:
+1. KLIMA III
+2. Starkregen
+3. Klimaanpassung
+4. Verwundbarkeitsanalysen
+5. Monitoring
+6. Maßnahmenkulissen
+
+Ergebnis:
+Nicht auf den großen Universalauftrag warten, sondern in neue Bedarfsfelder hineinwachsen.
+
+## Phase 8: Mittelfristiger Ausbau
+Ziel: aus dem Demonstrator eine belastbare Fachplattform machen.
+
+Arbeitspakete:
+1. mehr Szenarien
+2. bessere Maßnahmenlogik
+3. zusätzliche Rechenmodi
+4. stärkere Export- und Berichtsfunktionen
+5. offen einbindbare Modellpfade später prüfen:
+   - Landlab
+   - pywatershed
+   - OpenLISEM
+
+Ergebnis:
+Mehr Tiefe, ohne den modularen Kern aufzugeben.
+
+## Phase 9: Zweite Linie außerhalb Sachsen-Anhalt
+Ziel: methodisch verwandten, aber fachlich anderen Pfad aufbauen.
+
+Pfad B:
+1. sozialräumliche Muster
+2. Vulnerabilität
+3. Benachteiligung
+4. Erreichbarkeit
+5. urbane Simulation
+
+Wichtige Einordnung:
+Das ist keine Nebenfunktion derselben Fachplattform, sondern eher eine zweite Anwendungslinie auf ähnlicher methodischer Basis.
+
+## Prioritätenfolge
+1. Sachsen-Anhalt-Datenbasis lokal stabil aufbauen.
+2. einfachen fachlichen Kern definieren.
+3. kleinen Demonstrator bauen.
+4. Paper-Linie parallel schärfen.
+5. wenige gute Kontakte gezielt ansprechen.
+6. Pilot- oder Fachmodul-Einstieg suchen.
+7. erst danach modellseitig vertiefen.
+
+## Kurzfassung
+Zuerst eine glaubwürdige Sachsen-Anhalt-Fachplattform mit offenem Datenkern und klarer Priorisierungslogik bauen. Parallel die Paper- und Kontaktlinie nutzen, um daraus Schritt für Schritt Pilotprojekte, Fachmodule und spätere Ausbaustufen zu entwickeln.
