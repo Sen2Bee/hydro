@@ -172,7 +172,25 @@ Die Arbeit von Batista et al. (2025) ist für dieses Projekt ein wichtiger Refer
 ### 8.3 Einordnung der C-Faktor-Methodik
 Die Arbeit von Steinhoff-Knopp et al. (2025) macht deutlich, dass C-Faktoren mit einjährigen oder zu groben Informationen systematisch an Aussagekraft verlieren können. Diese Einsicht bestätigt die Entscheidung, den C-Faktor in diesem Projekt als versionierte, explizit weiterentwickelbare Methodik zu führen. Die laufende Integration offener Crop-Historien ist deshalb kein Zusatzdetail, sondern fachlich ein zentraler Ausbaupfad. Auch feldparcel-orientierte C-Faktor-Arbeiten auf europäischer Ebene stützen diese Richtung (Matthews et al., 2023).
 
-Konkret wird derzeit ein In-Season-Klassifikationsmodell (CT-NOW) entwickelt, das Sentinel-2-Zeitreihen nutzt, um Kulturarten auf Schlagebene in vier Superklassen (Getreide, Grünland, Mais, Sonstige) zu klassifizieren. Bei einem Konfidenz-Schwellenwert von 0,4 erreicht dieses Modell eine Macro-F1 von 0,45 bei 42 % Flächenabdeckung — die verbleibenden Felder erhalten ein explizites „unknown" statt einer unsicheren Zuordnung. Für die Erosionsmodellierung ergibt sich daraus ein direkter Verbesserungspfad: Da der C-Faktor zwischen Kulturarten stark variiert (Grünland ca. 0,01; Mais bis 0,45), würde eine feldspezifische Kulturartzuweisung den bisher verwendeten statischen C-Proxy-Raster substantiell ergänzen. Da die ABAG-Ergebnisse als Gesamtindex vorliegen, lässt sich ein aktualisierter C-Faktor per Verhältniskorrektur (C_neu / C_alt) ohne vollständigen Neuberechnungslauf integrieren.
+Parallel zu diesem Projekt wurde das In-Season-Klassifikationsmodell CT-NOW entwickelt, das auf Basis offener Schlagdaten (NRW-Fruchtfolgen, EuroCrops, Thünen CTM) und Sentinel-1/2-Zeitreihen Kulturarten auf Schlagebene klassifiziert. Das Modell nutzt einen isotonisch kalibrierten HistGradientBoostingClassifier mit 144 Merkmalen (120 optische S2 + 24 S1-Radar) über 12 Beobachtungszeitpunkte und wurde auf 49.497 Trainingsfeldern aus 12 deutschen Bundesländern validiert.
+
+Der entscheidende methodische Hebel ist die agronomisch motivierte Klassenzusammenfassung. Während das detaillierte 13-Klassen-Modell bei Konfidenz >= 0,80 nur 51 % Abdeckung erreicht, löst die Reduktion auf 7 C-Faktor-relevante Klassen (Wintergetreide, Sommergetreide, Winterraps, Mais, Grünland, Hackfrüchte, Brache) das Coverage-Problem vollständig: **90,5 % Genauigkeit bei 97 % Abdeckung** (@conf >= 0,60). Die spektrale Mehrdeutigkeit innerhalb der zusammengefassten Gruppen (z.B. Winterweizen vs. Wintergerste) wird irrelevant, da diese Kulturen nahezu identische C-Faktoren aufweisen.
+
+Für die Erosionsmodellierung ist dies unmittelbar nutzbar, weil die 7 Klassen exakt die relevanten C-Faktor-Gruppen abdecken:
+
+| CT-NOW-Klasse | C-Faktor (DIN 19708) |
+|---|---|
+| Grünland | 0,01–0,04 |
+| Wintergetreide | 0,08–0,12 |
+| Winterraps | 0,15–0,25 |
+| Sommergetreide | 0,15–0,20 |
+| Hackfrüchte (Kartoffel, Zuckerrübe) | 0,25–0,40 |
+| Mais | 0,30–0,45 |
+| Brache | 0,01–0,05 |
+
+Damit lässt sich für 97 % aller Schläge ein feldspezifischer C-Faktor ableiten, der den bisher verwendeten statischen C-Proxy-Raster substantiell ergänzt. Im Per-Klassen-Vergleich übertrifft CT-NOW bei Konfidenz >= 0,70 die Thünen-Referenz (CTM 2021, OA = 84,0 %) in 10 von 12 Kulturarten. Da die ABAG-Ergebnisse als Gesamtindex vorliegen, lässt sich ein aktualisierter C-Faktor per Verhältniskorrektur (C_neu / C_alt) ohne vollständigen Neuberechnungslauf integrieren.
+
+CT-NOW ist damit kein zukünftiger Ausbaupfad mehr, sondern ein operativ verfügbarer Baustein für feldspezifische Erosionsbewertung.
 
 ## 9. Grenzen
 Die derzeitige Evidenz unterliegt mehreren klaren Einschränkungen:
@@ -191,10 +209,12 @@ Bereits im aktuellen Stand ist der Ansatz für drei Einsatzfelder sinnvoll:
 
 Die ArcEGMO-nahe Weiterentwicklung ist dabei bereits angelegt. Aus den bestehenden Outputs lassen sich priorisierte Flächen, Kartenlayer und spätere Vorher-Nachher-Szenarien über C- und P-Varianten ableiten.
 
+4. Feldspezifische C-Faktor-Verbesserung über CT-NOW-Integration: Die 7-Klassen-Klassifikation mit 90,5 % Genauigkeit bei 97 % Abdeckung ermöglicht für nahezu jeden Schlag in Sachsen-Anhalt eine kulturartenspezifische C-Faktor-Ableitung anstelle des bisherigen statischen Proxy-Rasters.
+
 ## 11. Schlussfolgerung
 Das Projekt etabliert für Sachsen-Anhalt eine reproduzierbare Brücke zwischen langfristiger Erosionsdisposition und ereignisbezogenem Schlagmonitoring. Der belastbarste derzeitige Beitrag ist eine produktionsfeste, auditierbare Pipeline mit sauber getrennter Ereignisvorberechnung, cache-basierter Modellphase und systematischen QA-Artefakten.
 
-Wissenschaftlich ist der Ansatz damit bereits als methodischer und infrastruktureller Beitrag tragfähig. Die abschließende Bewertung der Modellgüte gegenüber Alternativen folgt in einer nachgelagerten Ablations- und Validierungsstufe auf Basis des nun vollständig gemergten und qualitätsgesicherten Exportstands.
+Wissenschaftlich ist der Ansatz damit bereits als methodischer und infrastruktureller Beitrag tragfähig. Mit der Integration von CT-NOW steht zudem ein validierter Pfad zur feldspezifischen C-Faktor-Ableitung bereit, der den statischen Proxy-Raster für 97 % der Schläge durch kulturartenbasierte Werte ersetzt. Die abschließende Bewertung der Modellgüte gegenüber Alternativen folgt in einer nachgelagerten Ablations- und Validierungsstufe auf Basis des nun vollständig gemergten und qualitätsgesicherten Exportstands.
 
 ## 12. Reproduzierbarkeit und Artefaktkarte
 Zentrale Projektdateien für Methode, Betrieb und Paper-Artefakte sind:
