@@ -162,6 +162,20 @@ Abbildung 4 zeigt die priorisierten Top-10-Felder im räumlichen Kontext des fin
 
 Noch nicht belastbar berichtet werden sollten hingegen finale Klassifikationsmetriken, globale Vergleichstabellen und inferenzielle Aussagen zur Überlegenheit einzelner Modellvarianten. Diese Punkte gehören in eine nachgelagerte Ablations- und Validierungsphase mit unabhängigerer Referenzbasis.
 
+### 7.2 C-Faktor-Vergleich: Proxy-C vs. CT-NOW-C
+
+Die Integration feldspezifischer C-Faktoren über CT-NOW ermöglicht einen direkten Vergleich mit dem bisher verwendeten statischen Proxy-Raster (C = 0,15). Für `27 571` Felder mit CT-NOW-Klassifikation bei Konfidenz >= 0,40 wurde der ABAG-Index per Verhältniskorrektur (C_neu / C_alt) aktualisiert.
+
+Der Effekt ist erheblich: Der Median des ABAG-Index sinkt von `0,12` (Proxy-C) auf `0,06` (CT-NOW-C). Die Ursache liegt vor allem in der expliziten Identifikation von Grünlandflächen (30 % der klassifizierten Felder), deren C-Faktor mit 0,004 um den Faktor 37 niedriger liegt als der Proxy-Wert. Umgekehrt steigen die ABAG-Werte für Mais- und Hackfruchtflächen deutlich an (C = 0,34–0,40 vs. Proxy 0,15).
+
+Abbildung 5 zeigt den Vergleich in drei Perspektiven: (A) die Verteilungsverschiebung der ABAG-Mittelwerte, (B) die feldspezifische Veränderung nach Kulturart und (C) die resultierende ABAG-Differenzierung über die sieben CT-NOW-Klassen.
+
+![Abbildung 5: Vergleich ABAG-Index mit statischem Proxy-C-Faktor (links) und feldspezifischem CT-NOW-C-Faktor (rechts). Die Verhältniskorrektur verschiebt die Verteilung nach links (Grünland) und differenziert Hochrisikokulturen (Mais, Hackfrüchte) klar heraus.](figures/figure_05_cfactor_comparison.png)
+
+Der Vergleich zeigt, dass der statische C-Proxy das Erosionsrisiko für Grünlandflächen systematisch überschätzt und für Mais- und Hackfruchtflächen unterschätzt. Die CT-NOW-basierte Korrektur erzeugt eine fachlich plausiblere Risikodifferenzierung, bei der die bekannte Kulturartenabhängigkeit der Erosionsgefährdung (DIN 19708) auf Feldebene sichtbar wird.
+
+Einschränkend ist zu bemerken, dass die CT-NOW-Klassifikation für Sachsen-Anhalt mit einer medianen Konfidenz von 0,44 arbeitet, was teilweise auf die Cross-Year-Anwendung (Modell 2021, Daten 2024) und das Fehlen von Sentinel-1-Merkmalen in der Inferenz zurückzuführen ist. Insbesondere der Hackfrucht-Anteil von 24 % erscheint für Sachsen-Anhalt leicht erhöht und könnte auf Verwechslungen mit Sommergetreide hinweisen. Für die operative Anwendung wird daher empfohlen, die Konfidenz-Schwelle bei mindestens 0,60 zu setzen und Felder unterhalb dieser Schwelle weiterhin mit dem Proxy-C zu bewerten.
+
 ## 8. Diskussion
 ### 8.1 Fachliche Bedeutung
 Das Projekt zeigt, dass der Übergang von langfristiger Risikobewertung zu ereignisbezogenem Schlagmonitoring technisch und methodisch konsistent organisierbar ist. Der Hauptbeitrag liegt nicht in einem einzelnen Modellwert, sondern in einer belastbaren Architektur, die landesweite Ausführung, Restart-Sicherheit, QA und spätere Berichtsartefakte zusammenhält.
