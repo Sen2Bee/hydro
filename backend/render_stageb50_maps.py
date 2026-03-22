@@ -60,22 +60,38 @@ def _load_bbox(path: Path | None) -> tuple[float, float, float, float] | None:
     )
 
 
+def _geo_figsize(xs, ys, target_height=12.0):
+    """Compute figsize that matches the geographic aspect ratio.
+    SA is taller than wide (177x225 km), so we anchor on height."""
+    import math
+    lon_range = max(xs) - min(xs)
+    lat_range = max(ys) - min(ys)
+    mean_lat = sum(ys) / len(ys)
+    width_km = lon_range * 111.32 * math.cos(math.radians(mean_lat))
+    height_km = lat_range * 111.32
+    ratio = width_km / height_km if height_km > 0 else 1.0
+    return (target_height * ratio, target_height)
+
+
 def render_chunk_map(fields: list[dict], out_path: Path, title_suffix: str, state_bbox: tuple[float, float, float, float] | None) -> None:
+    import math
     cmap = plt.get_cmap("tab20")
-    fig, ax = plt.subplots(figsize=(10.5, 8.8))
-    handles = []
-    seen = set()
     xs = [r["x"] for r in fields]
     ys = [r["y"] for r in fields]
+    fig, ax = plt.subplots(figsize=_geo_figsize(xs, ys, target_height=12.0))
+    handles = []
+    seen = set()
     point_colors = []
     for row in fields:
         chunk_id = int(row["chunk_id"]) if row.get("chunk_id") is not None else 0
         color = cmap((chunk_id - 1) % 20) if chunk_id > 0 else "#999999"
         point_colors.append(color)
         if chunk_id > 0 and chunk_id not in seen:
-            handles.append(Patch(facecolor=color, edgecolor="none", label=f"Chunk {chunk_id}"))
+            handles.append(Patch(facecolor=color, edgecolor="none", label=f"Block {chunk_id}"))
             seen.add(chunk_id)
     ax.scatter(xs, ys, s=6.5, c=point_colors, alpha=0.8, linewidths=0)
+    mean_lat = sum(ys) / len(ys)
+    ax.set_aspect(1.0 / math.cos(math.radians(mean_lat)))
     if state_bbox:
         ax.set_xlim(state_bbox[0], state_bbox[2])
         ax.set_ylim(state_bbox[1], state_bbox[3])
@@ -84,7 +100,7 @@ def render_chunk_map(fields: list[dict], out_path: Path, title_suffix: str, stat
         ax.set_ylim(min(ys), max(ys))
     ax.set_xticks([])
     ax.set_yticks([])
-    ax.set_title(f"Erster 50-Chunk-Block im landesweiten Sachsen-Anhalt-Lauf ({title_suffix})")
+    ax.set_title(f"Räumliche Verteilung im {title_suffix}")
     ax.text(0.01, 0.99, "Darstellung über Flächenzentroide im Landesrahmen", transform=ax.transAxes, ha="left", va="top", fontsize=9)
     ax.legend(
         handles=sorted(handles, key=lambda h: int(h.get_label().split()[-1])),
@@ -94,7 +110,7 @@ def render_chunk_map(fields: list[dict], out_path: Path, title_suffix: str, stat
         framealpha=0.95,
         facecolor="white",
         edgecolor="#cccccc",
-        title="Chunk-Zuordnung",
+        title="Block-Zuordnung",
         title_fontsize=9,
         fontsize=8,
         ncol=2,
@@ -114,12 +130,19 @@ def render_top10_map(fields: list[dict], top10_fields: list[dict], top10_rows: l
             top_pts.append(item)
     top_pts.sort(key=lambda r: int(r["rank"]))
 
-    fig = plt.figure(figsize=(12.2, 8.1))
-    ax = fig.add_axes([0.06, 0.1, 0.58, 0.82])
-    ax_text = fig.add_axes([0.69, 0.1, 0.28, 0.82])
+    import math
+    xs_all = [r["x"] for r in fields]
+    ys_all = [r["y"] for r in fields]
+    geo_w, geo_h = _geo_figsize(xs_all, ys_all, target_height=10.0)
+    fig = plt.figure(figsize=(geo_w + 4.5, geo_h))
+    map_frac = geo_w / (geo_w + 4.5)
+    ax = fig.add_axes([0.04, 0.08, map_frac * 0.88, 0.84])
+    ax_text = fig.add_axes([map_frac * 0.88 + 0.08, 0.08, 0.25, 0.84])
 
-    ax.scatter([r["x"] for r in fields], [r["y"] for r in fields], s=5, color="#d9d9d9", alpha=0.45, linewidths=0)
+    ax.scatter(xs_all, ys_all, s=5, color="#d9d9d9", alpha=0.45, linewidths=0)
     ax.scatter([r["x"] for r in top_pts], [r["y"] for r in top_pts], s=105, color="#d62828", edgecolors="white", linewidths=0.9, zorder=3)
+    mean_lat = sum(ys_all) / len(ys_all)
+    ax.set_aspect(1.0 / math.cos(math.radians(mean_lat)))
     for r in top_pts:
         ax.text(r["x"], r["y"], str(r["rank"]), color="white", ha="center", va="center", fontsize=9.5, fontweight="bold", zorder=4)
 

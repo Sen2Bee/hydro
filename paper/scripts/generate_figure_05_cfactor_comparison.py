@@ -57,9 +57,9 @@ CROP_COLORS = {
 }
 
 # --- Figure setup ---
-fig = plt.figure(figsize=(18 / 2.54, 22 / 2.54), dpi=300, facecolor="white")
-gs = gridspec.GridSpec(2, 2, height_ratios=[1, 1.1], hspace=0.38, wspace=0.35,
-                       left=0.10, right=0.96, top=0.95, bottom=0.07)
+fig = plt.figure(figsize=(20 / 2.54, 28 / 2.54), dpi=300, facecolor="white")
+gs = gridspec.GridSpec(2, 2, height_ratios=[1, 1.3], hspace=0.55, wspace=0.40,
+                       left=0.12, right=0.96, top=0.89, bottom=0.09)
 
 LABEL_SIZE = 10
 TITLE_SIZE = 11
@@ -68,8 +68,8 @@ TITLE_SIZE = 11
 ax_a1 = fig.add_subplot(gs[0, 0])
 ax_a2 = fig.add_subplot(gs[0, 1])
 
-# Common x-axis range
-xmax = max(field_orig["abag_mean"].quantile(0.995), field_ctnow["abag_mean_ctnow"].quantile(0.995))
+# Common x-axis range — cap at P99 to use full plot area
+xmax = max(field_orig["abag_mean"].quantile(0.99), field_ctnow["abag_mean_ctnow"].quantile(0.99))
 bins = np.linspace(0, xmax, 40)
 
 # Left: Proxy-C
@@ -94,9 +94,9 @@ ax_a2.legend(fontsize=8, loc="upper right")
 ax_a2.tick_params(labelsize=9)
 ax_a2.set_xlim(0, xmax)
 
-# Suptitle for Panel A
-fig.text(0.53, 0.97, "(A) Verteilung ABAG-Index: Proxy-C vs. CT-NOW-C",
-         ha="center", fontsize=TITLE_SIZE, fontweight="bold")
+# Suptitle for Panel A — use fig.suptitle for proper spacing
+fig.suptitle("(A) Verteilung ABAG-Index: Proxy-C vs. CT-NOW-C",
+             fontsize=TITLE_SIZE, fontweight="bold", y=0.97)
 
 # ===== Panel B: Scatter plot =====
 ax_b = fig.add_subplot(gs[1, 0])
@@ -144,7 +144,7 @@ for patch, color in zip(bp["boxes"], box_colors):
     patch.set_facecolor(color)
     patch.set_alpha(0.8)
 
-ax_c.set_xticklabels(box_labels, rotation=35, ha="right", fontsize=8)
+ax_c.set_xticklabels(box_labels, rotation=40, ha="right", fontsize=8)
 ax_c.set_ylabel("ABAG-Index (Mittelwert)", fontsize=LABEL_SIZE)
 ax_c.set_title("(C) ABAG-Index nach Kulturart\n(CT-NOW)", fontsize=TITLE_SIZE, fontweight="bold")
 ax_c.tick_params(labelsize=9)
@@ -157,8 +157,8 @@ for i, crop_key in enumerate(ordered_crops):
         q3 = np.percentile(box_data[i], 75) if len(box_data[i]) > 0 else 0
         iqr = np.percentile(box_data[i], 75) - np.percentile(box_data[i], 25) if len(box_data[i]) > 0 else 0
         whisker_top = min(q3 + 1.5 * iqr, np.max(box_data[i])) if len(box_data[i]) > 0 else 0
-        ax_c.text(i + 1, whisker_top + 0.03, f"C={cf:.3f}", ha="center", va="bottom", fontsize=7,
-                  fontstyle="italic", color="#333333")
+        ax_c.text(i + 1, whisker_top + 0.02, f"C={cf:.3f}", ha="center", va="bottom", fontsize=6.5,
+                  fontstyle="italic", color="#333333", rotation=0)
 
 plt.savefig(OUT_FIG, dpi=300, facecolor="white", bbox_inches="tight")
 plt.close()
