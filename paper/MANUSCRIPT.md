@@ -2,7 +2,7 @@
 
 ## Status
 - Arbeitsmanuskript für ein deutschsprachiges Fachjournal
-- Projektstand der eingearbeiteten Artefakte: `2026-03-12`
+- Projektstand der eingearbeiteten Artefakte: 2026-03-23
 - Fokus: reproduzierbare Methodik, belastbarer Produktionspfad und fachliche Einordnung der derzeitigen Evidenz
 
 ## Titelvorschlag
@@ -154,6 +154,12 @@ Abbildung 4 zeigt die priorisierten Top-10-Felder im räumlichen Kontext des fin
 
 ![Abbildung 4: Top-10 priorisierte Felder im räumlichen Kontext des 50-Block-Finallaufs.](figures/figure_04_top10_map.png)
 
+### 7.1 Kombinierter Risikoscore
+
+Für die operative Priorisierung einzelner Schläge erweist sich weder der ABAG-Index noch der ML-Risikoscore allein als ausreichend differenziert. Der ABAG-Index bildet die langfristige Disposition ab, streut aber stark durch den C-Faktor-Einfluss. Der ML-Risikoscore erfasst die ereignisbezogene Belastung, liefert in der landesweiten Betrachtung jedoch einen engen Wertebereich (P10–P90: 33–54), weil die meisten Ackerflächen unter vergleichbaren Wetterereignissen ähnliche Wahrscheinlichkeiten zeigen.
+
+Erst ein kombinierter Score aus normalisiertem ABAG- und ML-Anteil (je 50 %) erzeugt eine räumlich und fachlich plausible Priorisierungskarte. Der kombinierte Score identifiziert Felder, auf denen strukturelles Risiko (Topographie, Boden) und aktuelle ereignisbezogene Belastung zusammentreffen. In der Top-10-Analyse (Abbildung 4) zeigt sich, dass die drei Bewertungsmethoden unterschiedliche räumliche Schwerpunkte setzen: ML-Hotspots konzentrieren sich im Harz- und Altmark-Raum (steile Hanglagen), ABAG-Hotspots verteilen sich stärker über den Süden (langfristige Abtragswerte), und der kombinierte Score hebt Felder hervor, die in beiden Dimensionen kritisch sind.
+
 Noch nicht belastbar berichtet werden sollten hingegen finale Klassifikationsmetriken, globale Vergleichstabellen und inferenzielle Aussagen zur Überlegenheit einzelner Modellvarianten. Diese Punkte gehören in eine nachgelagerte Ablations- und Validierungsphase mit unabhängigerer Referenzbasis.
 
 ### 7.2 C-Faktor-Vergleich: Proxy-C vs. CT-NOW-C
@@ -215,7 +221,7 @@ Bereits im aktuellen Stand ist der Ansatz für drei Einsatzfelder sinnvoll:
 2. kartengestützte Nachvollziehbarkeit für Fachbehörden und Projektpartner,
 3. Vorbereitung von Maßnahmen- und Szenarioläufen auf Basis kombinierter Risiko- und Ereignisinformation.
 
-Die ArcEGMO-nahe Weiterentwicklung ist dabei bereits angelegt. Aus den bestehenden Ergebnissen lassen sich priorisierte Flächen, Kartenlayer und spätere Vorher-Nachher-Szenarien über C- und P-Varianten ableiten.
+Aus den bestehenden Ergebnissen lassen sich priorisierte Flächen, Kartenlayer und spätere Vorher-Nachher-Szenarien über C- und P-Varianten ableiten.
 
 4. Feldspezifische C-Faktor-Verbesserung über CT-NOW-Integration: Die 7-Klassen-Klassifikation mit 90,5 % Genauigkeit bei 97 % Abdeckung ermöglicht für nahezu jeden Schlag in Sachsen-Anhalt eine kulturartenspezifische C-Faktor-Ableitung anstelle des bisherigen statischen Proxy-Rasters.
 
